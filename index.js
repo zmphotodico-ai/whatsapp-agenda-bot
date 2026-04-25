@@ -164,3 +164,4 @@ client.on('message', async (msg) => {
 
 app.get('/', (req, res) => res.send('WhatsApp Bot Ativo'));
 app.listen(PORT);
+// forçando reinicio do servidor limpo
