@@ -44,9 +44,16 @@ const client = new Client({
   }
 });
 
-client.on('qr', (qr) => {
-  console.log('SCANNEIE ESTE QR CODE NO WHATSAPP NOVO:');
-  qrcode.generate(qr, { small: true });
+client.on('qr', async (qr) => {
+  try {
+      // ⚠️ COLOQUE O NÚMERO DO SEU CHIP NOVO AQUI (55 + DDD + Numero)
+      const codigo = await client.requestPairingCode('5511900000000'); 
+      console.log('\n=========================================');
+      console.log('🔑 CÓDIGO DE EMPARELHAMENTO: ' + codigo);
+      console.log('=========================================\n');
+  } catch(e) {
+      console.log('Erro ao gerar código:', e);
+  }
 });
 
 client.on('ready', () => {
