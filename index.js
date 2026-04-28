@@ -43,14 +43,11 @@ const client = new Client({
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   }
 });
-
 client.on('qr', (qr) => {
-  console.log('\n=========================================');
-  console.log('SCANNEIE ESTE QR CODE NO WHATSAPP NOVO:');
-  console.log('=========================================\n');
-  qrcode.generate(qr, { small: true });
+  console.log('\n--- COPIE O TEXTO ABAIXO RAPIDAMENTE ---');
+  console.log(qr);
+  console.log('----------------------------------------\n');
 });
-
 client.on('ready', () => {
   console.log('✅ Robô do WhatsApp pronto!');
 });
