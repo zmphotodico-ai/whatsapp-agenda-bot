@@ -156,4 +156,4 @@ client.on('message', async (msg) => {
 
 app.get('/', (req, res) => res.send('WhatsApp Bot Ativo'));
 app.listen(PORT);
-// tentativa de terca
+// tentativa de quarta
