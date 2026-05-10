@@ -10,7 +10,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
-// 👇 COLOQUE AQUI O ID DA AGENDA QUE O SEU SITE USA
+// ID da agenda padrão
 const CALENDAR_ID = process.env.CALENDAR_ID || "alugueldeestudiofotografico@gmail.com";
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || "5511995540293@c.us"; 
 
@@ -46,7 +46,7 @@ async function sendMessage(chatId, text) {
 async function getAgendaOcupada() {
   try {
     const agora = new Date();
-    const limite = new Date(agora.getTime() + 15 * 24 * 60 * 60 * 1000); // Vê os próximos 15 dias
+    const limite = new Date(agora.getTime() + 15 * 24 * 60 * 60 * 1000); 
     const res = await calendar.events.list({
       calendarId: CALENDAR_ID,
       timeMin: agora.toISOString(),
@@ -71,22 +71,28 @@ async function gerarRespostaGemini(chatId, pergunta, nomeUsuario = "Cliente") {
   const ocupacaoAtual = await getAgendaOcupada();
 
   const SYSTEM_PROMPT = `
-Você é o assistente virtual do Aluguel de Estúdio Fotográfico. Atenda com agilidade e foco comercial.
+Você é o assistente virtual do Aluguel de Estúdio Fotográfico. Seu objetivo é fechar reservas e informar o cliente.
 CLIENTE: ${nomeUsuario}.
 
-🚨 REGRAS DE OURO:
+🚨 REGRAS DE OURO (NUNCA IGNORE):
 1. MÍNIMO: 2 horas de locação.
-2. DISPONIBILIDADE: Consulte SEMPRE a agenda abaixo. Se o horário estiver livre na agenda, pode oferecer, independente de ser domingo ou feriado. Se não estiver na agenda, diga que está ocupado.
-3. PREÇOS BELA VISTA: R$ 50/hora (1-2 pessoas). 
+2. DISPONIBILIDADE: Consulte SEMPRE a agenda abaixo. Se estiver livre, ofereça.
+3. PREÇOS BELA VISTA: R$ 50/hora (1-2 pessoas).
 4. PREÇOS ACLIMAÇÃO: Seg-Sex R$ 70/hora | Fim de Semana R$ 80/hora. (AB junto: R$ 100/110).
-5. GRUPOS 9-12 PESSOAS: Apenas Estúdio AB Aclimação por R$ 160/hora.
+5. GRUPOS 9-12 PESSOAS: Apenas Estúdio AB na Aclimação por R$ 160/hora.
 6. SINAL: R$ 50 (até 3h) ou 1/3 do valor (4h ou mais). PIX CNPJ: 43.345.289/0001-93.
-7. TARIFA NOTURNA: Avise que após as 21h os valores mudam.
+7. TARIFA NOTURNA: Após as 21h os valores mudam. Sempre avise isso se o cliente quiser horários tarde da noite.
+
+📄 INFORMAÇÕES E PDF (REGRA CRUCIAL):
+- SEMPRE que o cliente pedir valores, fotos, informações gerais ou perguntar "como funciona", você DEVE dizer que temos um PDF completo e enviar os links abaixo:
+- PDF GERAL COM TODOS OS VALORES: https://drive.google.com/file/d/1J8FC6mzmfkOhlHbRrKVLN92jYj9LF1bb/view?usp=sharing
+- FOTOS UNIDADE ACLIMAÇÃO: https://drive.google.com/drive/folders/100GPqd9sWFRtEE5YPZCYhyv_DkBNV_G9
+- FOTOS UNIDADE BELA VISTA: https://drive.google.com/drive/folders/1Navk6o2Gy9cDlD9FKAuizH8hd3nTMLEW
 
 ⚠️ GATILHO HUMANO (11 99554-0293):
-Assuntos logísticos (Portão, Uber), Visitas Técnicas, Equipamentos Extras ou Exceções de Pagamento.
+- NÃO tente resolver: Assuntos logísticos (Portão, Uber), Visitas Técnicas agendadas, Equipamentos Específicos (Lentes, Snoot, Projetor) ou Exceções de Pagamento. Encaminhe para o número acima.
 
-AGENDA REAL SINCRONIZADA:
+AGENDA REAL ATUALIZADA:
 ${ocupacaoAtual}
 `;
 
@@ -121,5 +127,5 @@ client.on('message', async (msg) => {
   } catch (e) { console.error(e); }
 });
 
-app.get('/', (req, res) => res.send('Agenda Integrada Online'));
+app.get('/', (req, res) => res.send('Bot Online com Regras de PDF Atualizadas'));
 app.listen(PORT);
