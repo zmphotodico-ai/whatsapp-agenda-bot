@@ -14,6 +14,9 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const CALENDAR_ID = process.env.CALENDAR_ID || "alugueldeestudiofotografico@gmail.com";
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || "5511995540293@c.us"; 
 
+// 🎛️ VARIÁVEL DE CONTROLE: Começa como ligado (true)
+let botAtivo = true;
+
 // =============================
 // GOOGLE CALENDAR
 // =============================
@@ -29,11 +32,23 @@ try {
 } catch (error) { console.error("Erro Calendar:", error); }
 
 // =============================
-// CONEXÃO WHATSAPP
+// CONEXÃO WHATSAPP (ANTI-QUEDA OPTIMIZED)
 // =============================
 const client = new Client({
   authStrategy: new LocalAuth(),
-  puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+  puppeteer: { 
+    headless: true,
+    args: [
+      '--no-sandbox', 
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage', // Evita travamentos por limite de memória RAM
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Reduz drasticamente o consumo de processamento no Railway
+      '--disable-gpu'
+    ] 
+  }
 });
 client.on('qr', (qr) => { console.log(qr); });
 client.on('ready', () => { console.log('✅ BOT MESTRE ONLINE E SINCRONIZADO!'); });
@@ -107,10 +122,38 @@ ${ocupacaoAtual}
   } catch (e) { return "Um momento, vou conferir com a recepção."; }
 }
 
+// =============================
+// PROCESSAMENTO DE MENSAGENS
+// =============================
 client.on('message', async (msg) => {
   try {
     const chatId = msg.from;
     if (chatId.includes('@g.us') || chatId === 'status@broadcast') return;
+
+    const textoMensagem = msg.body.trim().toLowerCase();
+
+    // 🔒 COMANDOS EXCLUSIVOS DO ADMIN PARA CONTROLAR O BOT
+    if (chatId === ADMIN_CHAT_ID) {
+      if (textoMensagem === '!desativar' || textoMensagem === '!bot off') {
+        botAtivo = false;
+        await sendMessage(ADMIN_CHAT_ID, "❌ O robô foi DESATIVADO. Pode responder manualmente de forma tranquila!");
+        return;
+      }
+      if (textoMensagem === '!ativar' || textoMensagem === '!bot on') {
+        botAtivo = true;
+        await sendMessage(ADMIN_CHAT_ID, "✅ O robô foi ATIVADO! Voltei a atender os clientes.");
+        return;
+      }
+      if (textoMensagem === '!status') {
+        await sendMessage(ADMIN_CHAT_ID, `🤖 O robô está atualmente: ${botAtivo ? "LIGADO ✅" : "DESLIGADO ❌"}`);
+        return;
+      }
+    }
+
+    // Se o bot estiver pausado/desativado, ele ignora as mensagens e deixa você falar livremente
+    if (!botAtivo) return;
+
+    // Comportamento normal quando ativo
     const chat = await msg.getChat();
     await chat.sendStateTyping(); 
     await new Promise(resolve => setTimeout(resolve, Math.random() * 3000 + 2000));
@@ -127,5 +170,5 @@ client.on('message', async (msg) => {
   } catch (e) { console.error(e); }
 });
 
-app.get('/', (req, res) => res.send('Bot Online com Regras de PDF Atualizadas'));
+app.get('/', (req, res) => res.send('Bot Online com Chave de Ativação e Proteção Anti-Queda'));
 app.listen(PORT);
