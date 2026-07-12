@@ -115,7 +115,7 @@ async function getAgendaOcupada() {
     return todos.map(ev => {
       const inicio = new Date(ev.start.dateTime || ev.start.date);
       const fim = new Date(ev.end.dateTime || ev.end.date);
-      return `- ${inicio.toLocaleDateString("pt-BR")} das ${inicio.toLocaleTimeString("pt-BR", {hour:'2-digit', minute:'2-digit'})} às ${fim.toLocaleTimeString("pt-BR", {hour:'2-digit', minute:'2-digit'})} (${ev.summary})`;
+      return `- ${inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" })} das ${inicio.toLocaleTimeString("pt-BR", {timeZone: "America/Sao_Paulo", hour:'2-digit', minute:'2-digit'})} às ${fim.toLocaleTimeString("pt-BR", {timeZone: "America/Sao_Paulo", hour:'2-digit', minute:'2-digit'})} (${ev.summary})`;
     }).join("\n");
   } catch (e) { return "Erro ao ler as agendas."; }
 }
@@ -140,11 +140,20 @@ function extrairTelefone(texto) {
 }
 
 // monta a mensagem que seria enviada ao cliente
-function montarMensagemConfirmacao(ev) {
+// calId indica de qual agenda o evento veio (para escolher o endereço da unidade)
+function montarMensagemConfirmacao(ev, calId) {
   const inicio = new Date(ev.start.dateTime || ev.start.date);
-  const data = inicio.toLocaleDateString("pt-BR", { weekday: 'long', day: '2-digit', month: '2-digit' });
-  const hora = inicio.toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' });
-  return `Olá! 😊 Aqui é do Estúdio ZM.\nEstou passando para confirmar sua reserva do dia ${data} às ${hora}.\nEstá tudo certo para você? Se precisar ajustar algo, é só me responder por aqui. 📸`;
+  const fim = new Date(ev.end.dateTime || ev.end.date);
+  const data = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: '2-digit', month: '2-digit' });
+  const horaInicio = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+  const horaFim = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+
+  // a PRIMEIRA agenda de CALENDAR_IDS é a Aclimação; a segunda é a Bela Vista
+  const ehAclimacao = (CALENDAR_IDS[0] === calId);
+  const endereco = ehAclimacao ? "Rua Gualaxo, 206 - Aclimação" : "Rua Santa Madalena, 46 - Bela Vista";
+  const estudio = ev.summary || "estúdio";
+
+  return `Olá! 😊 Aqui é do Aluguel de Estúdio Fotográfico.\nGostaria de confirmar sua reserva:\n\n📅 Dia: ${data}\n🕐 Das ${horaInicio} às ${horaFim}\n📸 ${estudio}\n📍 ${endereco}\n\nEstá tudo certo para você? Qualquer ajuste, é só me responder por aqui.`;
 }
 
 // procura eventos marcados como "pré" nas duas agendas
@@ -181,12 +190,12 @@ async function rodarEnsaioConfirmacoes() {
     return;
   }
   await sendMessage(ADMIN_CHAT_ID, `Encontrei ${achados.length} reserva(s) "pré". Abaixo está o que eu enviaria a cada cliente. NADA foi enviado a eles. 👇`);
-  for (const { ev } of achados) {
+  for (const { ev, calId } of achados) {
     const inicio = new Date(ev.start.dateTime || ev.start.date);
-    const data = inicio.toLocaleDateString("pt-BR");
-    const hora = inicio.toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' });
+    const data = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    const hora = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
     const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
-    const msg = montarMensagemConfirmacao(ev);
+    const msg = montarMensagemConfirmacao(ev, calId);
     const bloco = `━━━━━━━━━━\n📌 ${ev.summary || "(sem título)"}\n🗓️ ${data} às ${hora}\n📞 ${tel ? tel : "⚠️ telefone NÃO encontrado no evento"}\n\n✉️ Mensagem que eu enviaria:\n${msg}`;
     await sendMessage(ADMIN_CHAT_ID, bloco);
   }
