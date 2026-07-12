@@ -2,6 +2,7 @@ import express from "express";
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import pkg from "whatsapp-web.js";
+import QRCode from "qrcode";
 const { Client, LocalAuth } = pkg;
 
 const app = express();
@@ -61,8 +62,20 @@ const client = new Client({
     ]
   }
 });
-client.on('qr', (qr) => { console.log(qr); });
-client.on('ready', () => { console.log('✅ BOT MESTRE ONLINE E SINCRONIZADO!'); });
+// Guarda o QR mais recente para mostrar numa página web (mais fácil de escanear)
+let ultimoQR = null;
+let whatsappConectado = false;
+
+client.on('qr', (qr) => {
+  ultimoQR = qr;
+  whatsappConectado = false;
+  console.log("📲 Novo QR gerado. Abra a página /qr do seu app para escanear.");
+});
+client.on('ready', () => {
+  whatsappConectado = true;
+  ultimoQR = null;
+  console.log('✅ BOT MESTRE ONLINE E SINCRONIZADO!');
+});
 client.initialize();
 
 async function sendMessage(chatId, text) {
@@ -231,6 +244,13 @@ client.on('message', async (msg) => {
 
     const textoMensagem = msg.body.trim().toLowerCase();
 
+    // 🆔 DIAGNÓSTICO: responde a QUALQUER número com o próprio ID.
+    // Serve para descobrir o valor exato do ADMIN_CHAT_ID.
+    if (textoMensagem === '!meuid') {
+      await sendMessage(chatId, `Seu ID é:\n${chatId}\n\nÉ esse valor exato que deve ir no ADMIN_CHAT_ID.`);
+      return;
+    }
+
     // 🔒 COMANDOS EXCLUSIVOS DO ADMIN PARA CONTROLAR O BOT
     if (chatId === ADMIN_CHAT_ID) {
       if (textoMensagem === '!desativar' || textoMensagem === '!bot off') {
@@ -282,4 +302,32 @@ client.on('message', async (msg) => {
 });
 
 app.get('/', (req, res) => res.send('Bot Online com Chave de Ativação e Proteção Anti-Queda'));
+
+// 📲 Página para conectar o WhatsApp escaneando um QR de verdade
+app.get('/qr', async (req, res) => {
+  if (whatsappConectado) {
+    res.send("<h2 style='font-family:sans-serif'>✅ WhatsApp já está conectado.</h2>");
+    return;
+  }
+  if (!ultimoQR) {
+    res.send("<meta http-equiv='refresh' content='3'><h2 style='font-family:sans-serif'>Gerando o QR... aguarde alguns segundos.</h2>");
+    return;
+  }
+  try {
+    const dataUrl = await QRCode.toDataURL(ultimoQR, { width: 320, margin: 2 });
+    res.send(`<!doctype html><html><head><meta charset="utf-8">
+      <meta http-equiv="refresh" content="20">
+      <title>Conectar WhatsApp</title>
+      <style>body{font-family:sans-serif;text-align:center;background:#111;color:#eee;padding:24px}
+      img{background:#fff;padding:12px;border-radius:12px}</style></head>
+      <body><h2>Escaneie para conectar o robô</h2>
+      <img src="${dataUrl}" alt="QR Code"/>
+      <p>WhatsApp → Aparelhos conectados → Conectar um aparelho</p>
+      <p style="color:#888">A página se atualiza sozinha a cada 20s com um QR novo. É só manter aberta.</p>
+      </body></html>`);
+  } catch (e) {
+    res.status(500).send("Erro ao gerar o QR: " + e.message);
+  }
+});
+
 app.listen(PORT);
