@@ -106,6 +106,78 @@ async function getAgendaOcupada() {
 }
 
 // =============================
+// MODO ENSAIO — CONFIRMAÇÃO (manda só pro admin, nunca pro cliente)
+// =============================
+
+// tira acentos e deixa minúsculo, pra facilitar a busca
+function normalizar(s) {
+  return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+// tenta achar um telefone brasileiro dentro do texto do evento
+function extrairTelefone(texto) {
+  if (!texto) return null;
+  const m = texto.match(/(?:\+?55\s?)?\(?\d{2}\)?[\s.-]?\d{4,5}[\s.-]?\d{4}/);
+  if (!m) return null;
+  let num = m[0].replace(/\D/g, "");
+  if (num.length <= 11) num = "55" + num; // adiciona o código do Brasil se faltar
+  return num;
+}
+
+// monta a mensagem que seria enviada ao cliente
+function montarMensagemConfirmacao(ev) {
+  const inicio = new Date(ev.start.dateTime || ev.start.date);
+  const data = inicio.toLocaleDateString("pt-BR", { weekday: 'long', day: '2-digit', month: '2-digit' });
+  const hora = inicio.toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' });
+  return `Olá! 😊 Aqui é do Estúdio ZM.\nEstou passando para confirmar sua reserva do dia ${data} às ${hora}.\nEstá tudo certo para você? Se precisar ajustar algo, é só me responder por aqui. 📸`;
+}
+
+// procura eventos marcados como "pré" nas duas agendas
+async function coletarEventosPre(diasFrente = 7) {
+  const agora = new Date();
+  const limite = new Date(agora.getTime() + diasFrente * 24 * 60 * 60 * 1000);
+  let achados = [];
+  for (const calId of CALENDAR_IDS) {
+    try {
+      const res = await calendar.events.list({
+        calendarId: calId,
+        timeMin: agora.toISOString(),
+        timeMax: limite.toISOString(),
+        singleEvents: true,
+        orderBy: 'startTime',
+      });
+      for (const ev of (res.data.items || [])) {
+        const alvo = normalizar((ev.summary || "") + " " + (ev.description || ""));
+        if (/\bpre\b/.test(alvo)) { // considera "pré" quando aparece como palavra
+          achados.push({ ev, calId });
+        }
+      }
+    } catch (e) { console.error(`Erro ao ler a agenda ${calId}:`, e.message); }
+  }
+  return achados;
+}
+
+// roda o ensaio e manda o resultado SÓ pro admin
+async function rodarEnsaioConfirmacoes() {
+  await sendMessage(ADMIN_CHAT_ID, "🧪 MODO ENSAIO: procurando reservas 'pré' nas suas agendas...");
+  const achados = await coletarEventosPre(7);
+  if (achados.length === 0) {
+    await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva com 'pré' encontrada nos próximos 7 dias.\n\nSe você marca as pré-reservas de outro jeito, me diz como que eu ajusto o filtro.");
+    return;
+  }
+  await sendMessage(ADMIN_CHAT_ID, `Encontrei ${achados.length} reserva(s) "pré". Abaixo está o que eu enviaria a cada cliente. NADA foi enviado a eles. 👇`);
+  for (const { ev } of achados) {
+    const inicio = new Date(ev.start.dateTime || ev.start.date);
+    const data = inicio.toLocaleDateString("pt-BR");
+    const hora = inicio.toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' });
+    const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
+    const msg = montarMensagemConfirmacao(ev);
+    const bloco = `━━━━━━━━━━\n📌 ${ev.summary || "(sem título)"}\n🗓️ ${data} às ${hora}\n📞 ${tel ? tel : "⚠️ telefone NÃO encontrado no evento"}\n\n✉️ Mensagem que eu enviaria:\n${msg}`;
+    await sendMessage(ADMIN_CHAT_ID, bloco);
+  }
+}
+
+// =============================
 // CÉREBRO DO ROBÔ
 // =============================
 async function gerarRespostaGemini(chatId, pergunta, nomeUsuario = "Cliente") {
@@ -173,6 +245,18 @@ client.on('message', async (msg) => {
       }
       if (textoMensagem === '!status') {
         await sendMessage(ADMIN_CHAT_ID, `🤖 O robô está atualmente: ${botAtivo ? "LIGADO ✅" : "DESLIGADO ❌"}`);
+        return;
+      }
+      // 🔎 TESTE: mostra o que o robô está lendo das agendas (não liga o respondedor)
+      if (textoMensagem === '!agenda') {
+        await sendMessage(ADMIN_CHAT_ID, "🔎 Lendo as agendas, um instante...");
+        const lista = await getAgendaOcupada();
+        await sendMessage(ADMIN_CHAT_ID, `📅 AGENDA (próximos 15 dias):\n\n${lista}`);
+        return;
+      }
+      // 🧪 ENSAIO: monta as confirmações "pré" e manda só pra você (nada vai pro cliente)
+      if (textoMensagem === '!testar') {
+        await rodarEnsaioConfirmacoes();
         return;
       }
     }
