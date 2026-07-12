@@ -69,7 +69,9 @@ let whatsappConectado = false;
 client.on('qr', (qr) => {
   ultimoQR = qr;
   whatsappConectado = false;
-  console.log("📲 Novo QR gerado. Abra a página /qr do seu app para escanear.");
+  console.log("========== COPIE O TEXTO DO QR ABAIXO ==========");
+  console.log(qr);
+  console.log("=== Cole em um gerador de QR online (ex.: qrcode-monkey) e escaneie ===");
 });
 client.on('ready', () => {
   whatsappConectado = true;
