@@ -47,7 +47,7 @@ try {
 // CONEXÃO WHATSAPP (ANTI-QUEDA OPTIMIZED)
 // =============================
 const client = new Client({
-  authStrategy: new LocalAuth(),
+  authStrategy: new LocalAuth({ dataPath: "/app/.wwebjs_auth" }),
   puppeteer: {
     headless: true,
     args: [
@@ -139,21 +139,81 @@ function extrairTelefone(texto) {
   return num;
 }
 
+// extrai o nome do cliente da descrição (depois da palavra "Aluguel")
+function extrairNome(ev) {
+  const desc = ev.description || "";
+  const m = desc.match(/aluguel\s+(.+)/i);
+  if (!m) return null;
+  let nome = m[1].split("\n")[0].trim();
+  nome = nome.replace(/\s*R\$.*/i, "").trim(); // tira preço, se estiver na mesma linha
+  return nome || null;
+}
+
+// extrai o estúdio do título (a parte depois da barra, ex.: "13-16/A" -> "A")
+function extrairEstudio(ev) {
+  const t = (ev.summary || "").trim();
+  if (t.includes("/")) return t.split("/").pop().trim();
+  return t;
+}
+
+// TABELA DE VALORES POR HORA — faixa fixa de 3 a 5 pessoas
+// (o restante é cobrado no dia). semana = seg-sex | fds = sáb, dom e feriado
+const TABELA_PRECOS = {
+  aclimacao: {
+    semana: { A: 80, B: 80, C: 80, D: 80, AB: 110 },
+    fds:    { A: 90, B: 90, C: 90, D: 90, AB: 120 },
+  },
+  belavista: {
+    semana: { "1": 80, "2": 60, "3": 70 },
+    fds:    { "1": 90, "2": 80, "3": 80 },
+  },
+};
+
+// calcula total e sinal a partir do evento. Retorna null se não achar o preço.
+function calcularValores(ev, ehAclimacao) {
+  const inicio = new Date(ev.start.dateTime || ev.start.date);
+  const fim = new Date(ev.end.dateTime || ev.end.date);
+  const horas = (fim - inicio) / (1000 * 60 * 60);
+  if (!horas || horas <= 0) return null;
+
+  // dia da semana no fuso de SP
+  const diaTxt = inicio.toLocaleDateString("en-US", { timeZone: "America/Sao_Paulo", weekday: "short" });
+  const ehFimDeSemana = (diaTxt === "Sat" || diaTxt === "Sun");
+  const periodo = ehFimDeSemana ? "fds" : "semana";
+
+  const unidade = ehAclimacao ? "aclimacao" : "belavista";
+  const estudioBruto = extrairEstudio(ev).toUpperCase().replace(/\s/g, "");
+  const valorHora = TABELA_PRECOS[unidade][periodo][estudioBruto];
+  if (!valorHora) return null; // estúdio não reconhecido na tabela
+
+  const total = Math.round(horas * valorHora);
+  let sinal = Math.round(total / 3);
+  if (sinal < 50) sinal = 50; // sinal mínimo
+  return { total, sinal };
+}
+
 // monta a mensagem que seria enviada ao cliente
 // calId indica de qual agenda o evento veio (para escolher o endereço da unidade)
 function montarMensagemConfirmacao(ev, calId) {
   const inicio = new Date(ev.start.dateTime || ev.start.date);
   const fim = new Date(ev.end.dateTime || ev.end.date);
-  const data = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: '2-digit', month: '2-digit' });
-  const horaInicio = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-  const horaFim = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+  const dataExtenso = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: 'numeric', month: 'long' });
+  const horaInicio = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+  const horaFim = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
 
   // a PRIMEIRA agenda de CALENDAR_IDS é a Aclimação; a segunda é a Bela Vista
   const ehAclimacao = (CALENDAR_IDS[0] === calId);
   const endereco = ehAclimacao ? "Rua Gualaxo, 206 - Aclimação" : "Rua Santa Madalena, 46 - Bela Vista";
-  const estudio = ev.summary || "estúdio";
+  const estudio = extrairEstudio(ev);
+  const nome = extrairNome(ev);
+  const saudacao = nome ? `Olá ${nome}, tudo bem? 😊` : "Olá, tudo bem? 😊";
 
-  return `Olá! 😊 Aqui é do Aluguel de Estúdio Fotográfico.\nGostaria de confirmar sua reserva:\n\n📅 Dia: ${data}\n🕐 Das ${horaInicio} às ${horaFim}\n📸 ${estudio}\n📍 ${endereco}\n\nEstá tudo certo para você? Qualquer ajuste, é só me responder por aqui.`;
+  const valores = calcularValores(ev, ehAclimacao);
+  const linhaValor = valores
+    ? `\n\nSinal para reservar: R$ ${valores.sinal}`
+    : "";
+
+  return `${saudacao}\nGostaria de confirmar o Aluguel de Estúdio ${dataExtenso}, das ${horaInicio} às ${horaFim}, no Estúdio ${estudio}.\n${endereco}${linhaValor}\n\nPIX/CNPJ\nzmphoto@zmphoto.com.br\n43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
 }
 
 // procura eventos marcados como "pré" nas duas agendas
