@@ -139,14 +139,17 @@ function extrairTelefone(texto) {
   return num;
 }
 
-// extrai o nome do cliente da descrição (depois da palavra "Aluguel")
+// extrai o nome do cliente da descrição (primeira palavra/nome, ignorando "Aluguel" e telefone)
 function extrairNome(ev) {
-  const desc = ev.description || "";
-  const m = desc.match(/aluguel\s+(.+)/i);
-  if (!m) return null;
-  let nome = m[1].split("\n")[0].trim();
-  nome = nome.replace(/\s*R\$.*/i, "").trim(); // tira preço, se estiver na mesma linha
-  return nome || null;
+  let desc = (ev.description || "").split("\n")[0].trim();
+  if (!desc) return null;
+  // remove "Aluguel" do começo, se houver
+  desc = desc.replace(/^aluguel\s+/i, "").trim();
+  // corta a partir do telefone (quando começa o +55 ou uma sequência de dígitos)
+  desc = desc.replace(/\s*(\+?55)?[\s(]*\d{2}[\s).-]*\d.*$/, "").trim();
+  // tira preço, se estiver junto
+  desc = desc.replace(/\s*R\$.*/i, "").trim();
+  return desc || null;
 }
 
 // extrai o estúdio do título (a parte depois da barra, ex.: "13-16/A" -> "A")
