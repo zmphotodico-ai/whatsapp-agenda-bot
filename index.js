@@ -3,6 +3,7 @@ import fetch from "node-fetch";
 import { google } from "googleapis";
 import pkg from "whatsapp-web.js";
 import QRCode from "qrcode";
+import cron from "node-cron";
 const { Client, LocalAuth } = pkg;
 
 const app = express();
@@ -444,5 +445,21 @@ app.get('/qr', async (req, res) => {
     res.status(500).send("Erro ao gerar o QR: " + e.message);
   }
 });
+
+// =============================
+// AGENDADOR — roda o ENSAIO automaticamente todo dia às 8h (fuso de São Paulo)
+// =============================
+cron.schedule('0 8 * * *', async () => {
+  console.log("⏰ Rodando o ensaio automático das 8h...");
+  try {
+    if (!whatsappConectado) {
+      console.log("WhatsApp não conectado, ensaio adiado.");
+      return;
+    }
+    await rodarEnsaioConfirmacoes();
+  } catch (e) {
+    console.error("Erro no ensaio automático:", e.message);
+  }
+}, { timezone: "America/Sao_Paulo" });
 
 app.listen(PORT);
