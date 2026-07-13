@@ -139,24 +139,35 @@ function extrairTelefone(texto) {
   return num;
 }
 
-// extrai o nome do cliente da descrição (primeira palavra/nome, ignorando "Aluguel" e telefone)
+// extrai o nome do cliente da descrição (primeira palavra/nome, ignorando "Aluguel", hashtags e telefone)
 function extrairNome(ev) {
   let desc = (ev.description || "").split("\n")[0].trim();
   if (!desc) return null;
-  // remove "Aluguel" do começo, se houver
-  desc = desc.replace(/^aluguel\s+/i, "").trim();
-  // corta a partir do telefone (quando começa o +55 ou uma sequência de dígitos)
-  desc = desc.replace(/\s*(\+?55)?[\s(]*\d{2}[\s).-]*\d.*$/, "").trim();
-  // tira preço, se estiver junto
-  desc = desc.replace(/\s*R\$.*/i, "").trim();
+  desc = desc.replace(/#/g, " ");                 // remove hashtags
+  desc = desc.replace(/\baluguel\b/gi, " ");      // remove a palavra "Aluguel" em qualquer lugar
+  desc = desc.replace(/\s*(\+?55)?[\s(]*\d{2}[\s).-]*\d.*$/, ""); // corta a partir do telefone
+  desc = desc.replace(/\s*R\$.*/i, "");           // tira preço, se estiver junto
+  desc = desc.replace(/\s+/g, " ").trim();
   return desc || null;
 }
 
-// extrai o estúdio do título (a parte depois da barra, ex.: "13-16/A" -> "A")
+// extrai o estúdio do título, mesmo com bagunça (pré, barras, espaços).
+// Estúdios válidos: AB, A, B, C, D (Aclimação) e 1, 2, 3 (Bela Vista).
 function extrairEstudio(ev) {
-  const t = (ev.summary || "").trim();
-  if (t.includes("/")) return t.split("/").pop().trim();
-  return t;
+  let t = (ev.summary || "").toUpperCase();
+  // remove qualquer variação de "pré/pre/pré pré"
+  t = t.replace(/PR[EÉ]/g, " ");
+  // remove tudo que parece horário (ex.: 19:30-22:30, 10/18, 08-20)
+  t = t.replace(/\d{1,2}\s*[:.]?\s*\d{0,2}\s*[-–/]\s*\d{1,2}\s*[:.]?\s*\d{0,2}/g, " ");
+  // troca barras por espaço e limpa
+  t = t.replace(/[\/]/g, " ").replace(/\s+/g, " ").trim();
+  // procura o estúdio como palavra isolada, na ordem (AB antes de A/B)
+  const candidatos = ["AB", "A", "B", "C", "D", "1", "2", "3"];
+  const tokens = t.split(" ").filter(Boolean);
+  for (const c of candidatos) {
+    if (tokens.includes(c)) return c;
+  }
+  return null; // não reconhecido
 }
 
 // TABELA DE VALORES POR HORA — faixa fixa de 3 a 5 pessoas
@@ -208,6 +219,7 @@ function montarMensagemConfirmacao(ev, calId) {
   const ehAclimacao = (CALENDAR_IDS[0] === calId);
   const endereco = ehAclimacao ? "Rua Gualaxo, 206 - Aclimação" : "Rua Santa Madalena, 46 - Bela Vista";
   const estudio = extrairEstudio(ev);
+  const textoEstudio = estudio ? `, no Estúdio ${estudio}` : "";
   const nome = extrairNome(ev);
   const saudacao = nome ? `Olá ${nome}, tudo bem? 😊` : "Olá, tudo bem? 😊";
 
@@ -216,11 +228,11 @@ function montarMensagemConfirmacao(ev, calId) {
     ? `\n\nSinal para reservar: R$ ${valores.sinal}`
     : "";
 
-  return `${saudacao}\nGostaria de confirmar o Aluguel de Estúdio ${dataExtenso}, das ${horaInicio} às ${horaFim}, no Estúdio ${estudio}.\n${endereco}${linhaValor}\n\nPIX/CNPJ\nzmphoto@zmphoto.com.br\n43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
+  return `${saudacao}\nGostaria de confirmar o Aluguel de Estúdio ${dataExtenso}, das ${horaInicio} às ${horaFim}${textoEstudio}.\n${endereco}${linhaValor}\n\nPIX/CNPJ\nzmphoto@zmphoto.com.br\n43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
 }
 
 // procura eventos marcados como "pré" nas duas agendas
-async function coletarEventosPre(diasFrente = 7) {
+async function coletarEventosPre(diasFrente = 90) {
   const agora = new Date();
   const limite = new Date(agora.getTime() + diasFrente * 24 * 60 * 60 * 1000);
   let achados = [];
@@ -235,6 +247,8 @@ async function coletarEventosPre(diasFrente = 7) {
       });
       for (const ev of (res.data.items || [])) {
         const alvo = normalizar((ev.summary || "") + " " + (ev.description || ""));
+        // pula clientes com combinado diferente (marcados com #naocobrar)
+        if (alvo.includes("naocobrar") || alvo.includes("nao cobrar")) continue;
         if (/\bpre\b/.test(alvo)) { // considera "pré" quando aparece como palavra
           achados.push({ ev, calId });
         }
@@ -244,10 +258,32 @@ async function coletarEventosPre(diasFrente = 7) {
   return achados;
 }
 
+// lista as reservas "pré" que estão SEM telefone, pra facilitar o preenchimento
+async function listarSemTelefone() {
+  const achados = await coletarEventosPre(90);
+  const semTel = [];
+  for (const { ev } of achados) {
+    const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
+    if (!tel) semTel.push(ev);
+  }
+  if (semTel.length === 0) {
+    await sendMessage(ADMIN_CHAT_ID, "✅ Todas as reservas 'pré' já têm telefone. Nada a preencher!");
+    return;
+  }
+  let msg = `📵 ${semTel.length} reserva(s) 'pré' SEM telefone (preencher na descrição):\n`;
+  for (const ev of semTel) {
+    const inicio = new Date(ev.start.dateTime || ev.start.date);
+    const data = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    const hora = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+    msg += `\n━━━━━━\n📌 ${ev.summary || "(sem título)"}\n🗓️ ${data} às ${hora}\n👤 ${extrairNome(ev) || "(sem nome)"}`;
+  }
+  await sendMessage(ADMIN_CHAT_ID, msg);
+}
+
 // roda o ensaio e manda o resultado SÓ pro admin
 async function rodarEnsaioConfirmacoes() {
   await sendMessage(ADMIN_CHAT_ID, "🧪 MODO ENSAIO: procurando reservas 'pré' nas suas agendas...");
-  const achados = await coletarEventosPre(7);
+  const achados = await coletarEventosPre(90);
   if (achados.length === 0) {
     await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva com 'pré' encontrada nos próximos 7 dias.\n\nSe você marca as pré-reservas de outro jeito, me diz como que eu ajusto o filtro.");
     return;
@@ -351,6 +387,11 @@ client.on('message', async (msg) => {
       // 🧪 ENSAIO: monta as confirmações "pré" e manda só pra você (nada vai pro cliente)
       if (textoMensagem === '!testar') {
         await rodarEnsaioConfirmacoes();
+        return;
+      }
+      // 📵 lista as reservas "pré" que estão sem telefone
+      if (textoMensagem === '!semtelefone') {
+        await listarSemTelefone();
         return;
       }
     }
