@@ -202,7 +202,7 @@ function calcularValores(ev, ehAclimacao) {
   if (!valorHora) return null; // estúdio não reconhecido na tabela
 
   const total = Math.round(horas * valorHora);
-  let sinal = Math.round(total / 3);
+  let sinal = Math.floor((total / 3) / 10) * 10; // arredonda pra baixo, múltiplo de 10
   if (sinal < 50) sinal = 50; // sinal mínimo
   return { total, sinal };
 }
@@ -248,8 +248,8 @@ async function coletarEventosPre(diasFrente = 90) {
       });
       for (const ev of (res.data.items || [])) {
         const alvo = normalizar((ev.summary || "") + " " + (ev.description || ""));
-        // pula clientes com combinado diferente (marcados com #naocobrar)
-        if (alvo.includes("naocobrar") || alvo.includes("nao cobrar")) continue;
+        // pula clientes com combinado diferente (marcados com #zm)
+        if (alvo.includes("#zm")) continue;
         if (/\bpre\b/.test(alvo)) { // considera "pré" quando aparece como palavra
           achados.push({ ev, calId });
         }
@@ -281,22 +281,98 @@ async function listarSemTelefone() {
   await sendMessage(ADMIN_CHAT_ID, msg);
 }
 
+// monta uma linha curta de uma reserva (para a lista dentro da mensagem agrupada)
+function montarLinhaReserva(ev) {
+  const inicio = new Date(ev.start.dateTime || ev.start.date);
+  const fim = new Date(ev.end.dateTime || ev.end.date);
+  const data = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: '2-digit', month: '2-digit' });
+  const hi = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+  const hf = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+  const est = extrairEstudio(ev);
+  const textoEst = est ? `, Estúdio ${est}` : "";
+  return `• ${data}, das ${hi} às ${hf}${textoEst}`;
+}
+
+// escolhe o nome mais completo entre as reservas do mesmo cliente
+function escolherNome(eventos) {
+  let melhor = "";
+  for (const { ev } of eventos) {
+    const nome = extrairNome(ev) || "";
+    if (nome.length > melhor.length) melhor = nome;
+  }
+  return melhor || null;
+}
+
+// monta a mensagem AGRUPADA (uma ou várias datas do mesmo cliente)
+function montarMensagemAgrupada(eventos) {
+  // ordena as reservas por data
+  eventos.sort((a, b) =>
+    new Date(a.ev.start.dateTime || a.ev.start.date) - new Date(b.ev.start.dateTime || b.ev.start.date)
+  );
+  const nome = escolherNome(eventos);
+  const saudacao = nome ? `Olá ${nome}, tudo bem? 😊` : "Olá, tudo bem? 😊";
+
+  // endereço: usa o da unidade da primeira reserva
+  const ehAclimacao = (CALENDAR_IDS[0] === eventos[0].calId);
+  const endereco = ehAclimacao ? "Rua Gualaxo, 206 - Aclimação" : "Rua Santa Madalena, 46 - Bela Vista";
+
+  // soma os sinais
+  let sinalTotal = 0;
+  let temValor = false;
+  for (const { ev, calId } of eventos) {
+    const acl = (CALENDAR_IDS[0] === calId);
+    const v = calcularValores(ev, acl);
+    if (v) { sinalTotal += v.sinal; temValor = true; }
+  }
+
+  const linhas = eventos.map(({ ev }) => montarLinhaReserva(ev)).join("\n");
+  const abertura = eventos.length > 1
+    ? `${saudacao}\nGostaria de confirmar o Aluguel de Estúdio nas seguintes datas:`
+    : `${saudacao}\nGostaria de confirmar o Aluguel de Estúdio:`;
+  const linhaValor = temValor ? `\n\nSinal para reservar: R$ ${sinalTotal}` : "";
+
+  return `${abertura}\n\n${linhas}\n${endereco}${linhaValor}\n\nPIX/CNPJ\nzmphoto@zmphoto.com.br\n43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
+}
+
 // roda o ensaio e manda o resultado SÓ pro admin
 async function rodarEnsaioConfirmacoes() {
   await sendMessage(ADMIN_CHAT_ID, "🧪 MODO ENSAIO: procurando reservas 'pré' nas suas agendas...");
   const achados = await coletarEventosPre(90);
   if (achados.length === 0) {
-    await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva com 'pré' encontrada nos próximos 7 dias.\n\nSe você marca as pré-reservas de outro jeito, me diz como que eu ajusto o filtro.");
+    await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva com 'pré' encontrada nos próximos 90 dias.");
     return;
   }
-  await sendMessage(ADMIN_CHAT_ID, `Encontrei ${achados.length} reserva(s) "pré". Abaixo está o que eu enviaria a cada cliente. NADA foi enviado a eles. 👇`);
-  for (const { ev, calId } of achados) {
-    const inicio = new Date(ev.start.dateTime || ev.start.date);
-    const data = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
-    const hora = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-    const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
-    const msg = montarMensagemConfirmacao(ev, calId);
-    const bloco = `━━━━━━━━━━\n📌 ${ev.summary || "(sem título)"}\n🗓️ ${data} às ${hora}\n📞 ${tel ? tel : "⚠️ telefone NÃO encontrado no evento"}\n\n✉️ Mensagem que eu enviaria:\n${msg}`;
+
+  // separa por telefone: mesmo número = mesmo cliente (agrupa)
+  const grupos = {};      // telefone -> lista de {ev, calId}
+  const semTelefone = []; // sem número: ficam separados
+
+  for (const item of achados) {
+    const tel = extrairTelefone((item.ev.summary || "") + " " + (item.ev.description || ""));
+    if (tel) {
+      if (!grupos[tel]) grupos[tel] = [];
+      grupos[tel].push(item);
+    } else {
+      semTelefone.push(item);
+    }
+  }
+
+  const totalClientes = Object.keys(grupos).length + semTelefone.length;
+  await sendMessage(ADMIN_CHAT_ID, `Encontrei ${achados.length} reserva(s) "pré", agrupadas em ${totalClientes} cliente(s). Abaixo, o que eu enviaria a cada um. NADA foi enviado. 👇`);
+
+  // clientes COM telefone (agrupados)
+  for (const tel of Object.keys(grupos)) {
+    const eventos = grupos[tel];
+    const msg = montarMensagemAgrupada(eventos);
+    const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
+    const bloco = `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`;
+    await sendMessage(ADMIN_CHAT_ID, bloco);
+  }
+
+  // clientes SEM telefone (separados, um a um)
+  for (const { ev, calId } of semTelefone) {
+    const msg = montarMensagemAgrupada([{ ev, calId }]);
+    const bloco = `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`;
     await sendMessage(ADMIN_CHAT_ID, bloco);
   }
 }
