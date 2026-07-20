@@ -85,6 +85,11 @@ async function sendMessage(chatId, text) {
   try { await client.sendMessage(chatId, text); } catch (e) { console.error(e); }
 }
 
+// pausa (em milissegundos) — usada para espaçar o envio de várias mensagens
+function esperar(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ✅ NOVO: lê TODAS as agendas de CALENDAR_IDS, junta e ordena por horário
 async function getAgendaOcupada() {
   try {
@@ -367,6 +372,7 @@ async function rodarEnsaioConfirmacoes() {
     const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
     const bloco = `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`;
     await sendMessage(ADMIN_CHAT_ID, bloco);
+    await esperar(3000); // pausa de 3s entre mensagens para não sobrecarregar o WhatsApp
   }
 
   // clientes SEM telefone (separados, um a um)
@@ -374,7 +380,10 @@ async function rodarEnsaioConfirmacoes() {
     const msg = montarMensagemAgrupada([{ ev, calId }]);
     const bloco = `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`;
     await sendMessage(ADMIN_CHAT_ID, bloco);
+    await esperar(3000); // pausa de 3s entre mensagens
   }
+
+  await sendMessage(ADMIN_CHAT_ID, `✅ Fim do ensaio. ${totalClientes} cliente(s) processado(s).`);
 }
 
 // =============================
