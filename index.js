@@ -248,8 +248,8 @@ async function coletarEventosPre(diasFrente = 90) {
       });
       for (const ev of (res.data.items || [])) {
         const alvo = normalizar((ev.summary || "") + " " + (ev.description || ""));
-        // pula clientes com combinado diferente (marcados com #zm)
-        if (alvo.includes("#zm")) continue;
+        // pula clientes com combinado diferente (marcados com zm, #zm, # zm, ZM...)
+        if (/#?\s*\bzm\b/.test(alvo)) continue;
         if (/\bpre\b/.test(alvo)) { // considera "pré" quando aparece como palavra
           achados.push({ ev, calId });
         }
