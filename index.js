@@ -367,19 +367,29 @@ async function rodarEnsaioConfirmacoes() {
 
   // clientes COM telefone (agrupados)
   for (const tel of Object.keys(grupos)) {
-    const eventos = grupos[tel];
-    const msg = montarMensagemAgrupada(eventos);
-    const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
-    const bloco = `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`;
-    await sendMessage(ADMIN_CHAT_ID, bloco);
+    try {
+      const eventos = grupos[tel];
+      const msg = montarMensagemAgrupada(eventos);
+      const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
+      const bloco = `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`;
+      await sendMessage(ADMIN_CHAT_ID, bloco);
+    } catch (e) {
+      console.error("Erro ao montar bloco do telefone", tel, e.message);
+      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar o cliente ${tel}: ${e.message}`);
+    }
     await esperar(3000); // pausa de 3s entre mensagens para não sobrecarregar o WhatsApp
   }
 
   // clientes SEM telefone (separados, um a um)
   for (const { ev, calId } of semTelefone) {
-    const msg = montarMensagemAgrupada([{ ev, calId }]);
-    const bloco = `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`;
-    await sendMessage(ADMIN_CHAT_ID, bloco);
+    try {
+      const msg = montarMensagemAgrupada([{ ev, calId }]);
+      const bloco = `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`;
+      await sendMessage(ADMIN_CHAT_ID, bloco);
+    } catch (e) {
+      console.error("Erro ao montar bloco de", ev.summary, e.message);
+      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar "${ev.summary || "(sem título)"}": ${e.message}`);
+    }
     await esperar(3000); // pausa de 3s entre mensagens
   }
 
