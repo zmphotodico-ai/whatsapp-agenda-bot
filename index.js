@@ -165,8 +165,8 @@ function extrairEstudio(ev) {
   t = t.replace(/PR[EÉ]/g, " ");
   // remove tudo que parece horário (ex.: 19:30-22:30, 10/18, 08-20)
   t = t.replace(/\d{1,2}\s*[:.]?\s*\d{0,2}\s*[-–/]\s*\d{1,2}\s*[:.]?\s*\d{0,2}/g, " ");
-  // troca barras por espaço e limpa
-  t = t.replace(/[\/]/g, " ").replace(/\s+/g, " ").trim();
+  // troca barras, asteriscos e outros símbolos por espaço e limpa
+  t = t.replace(/[\/*#.\-–]/g, " ").replace(/\s+/g, " ").trim();
   // procura o estúdio como palavra isolada, na ordem (AB antes de A/B)
   const candidatos = ["AB", "A", "B", "C", "D", "1", "2", "3"];
   const tokens = t.split(" ").filter(Boolean);
@@ -237,12 +237,15 @@ function montarMensagemConfirmacao(ev, calId) {
   return `${saudacao}\nGostaria de confirmar o Aluguel de Estúdio ${dataExtenso}, das ${horaInicio} às ${horaFim}${textoEstudio}.\n${endereco}${linhaValor}\n\nPIX/CNPJ\nzmphoto@zmphoto.com.br\n43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
 }
 
-// procura eventos marcados como "pré" nas duas agendas
+// procura eventos marcados como "pré" nas agendas de COBRANÇA
+// (ignora a agenda de Cancelados, que é a 3ª em CALENDAR_IDS)
 async function coletarEventosPre(diasFrente = 90) {
   const agora = new Date();
   const limite = new Date(agora.getTime() + diasFrente * 24 * 60 * 60 * 1000);
   let achados = [];
-  for (const calId of CALENDAR_IDS) {
+  // só as duas primeiras agendas (Aclimação e Bela Vista). A 3ª (Cancelados) é ignorada.
+  const agendasCobranca = CALENDAR_IDS.slice(0, 2);
+  for (const calId of agendasCobranca) {
     try {
       const res = await calendar.events.list({
         calendarId: calId,
@@ -339,61 +342,164 @@ function montarMensagemAgrupada(eventos) {
   return `${abertura}\n\n${linhas}\n${endereco}${linhaValor}\n\nPIX/CNPJ\nzmphoto@zmphoto.com.br\n43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
 }
 
-// roda o ensaio e manda o resultado SÓ pro admin
-async function rodarEnsaioConfirmacoes() {
-  await sendMessage(ADMIN_CHAT_ID, "🧪 MODO ENSAIO: procurando reservas 'pré' nas suas agendas...");
+// busca reservas "pré" cujo nome/descrição contém o texto pesquisado
+async function buscarPorNome(termo) {
+  const alvo = normalizar(termo);
+  const achados = await coletarEventosPre(90);
+  const encontrados = achados.filter(({ ev }) => {
+    const texto = normalizar((ev.summary || "") + " " + (ev.description || ""));
+    return texto.includes(alvo);
+  });
+  if (encontrados.length === 0) {
+    await sendMessage(ADMIN_CHAT_ID, `🔍 Nenhuma reserva "pré" encontrada para "${termo}".`);
+    return;
+  }
+  let msg = `🔍 ${encontrados.length} reserva(s) para "${termo}":\n`;
+  for (const { ev } of encontrados) {
+    const inicio = new Date(ev.start.dateTime || ev.start.date);
+    const data = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'short', day: '2-digit', month: '2-digit' });
+    const hora = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+    const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
+    const est = extrairEstudio(ev);
+    msg += `\n━━━━━━\n📌 ${ev.summary || "(sem título)"}\n🗓️ ${data} às ${hora}${est ? ` · Estúdio ${est}` : ""}\n📞 ${tel || "⚠️ SEM telefone"}`;
+  }
+  await sendMessage(ADMIN_CHAT_ID, msg);
+}
+
+// conta quantas vezes já foi cobrado, lendo as marcas na descrição
+function contarAvisos(ev) {
+  const desc = ev.description || "";
+  const matches = desc.match(/\[cobrado \d+x/gi);
+  return matches ? matches.length : 0;
+}
+
+// acrescenta a marca de cobrança na descrição do evento (sem apagar nada)
+async function marcarCobranca(ev, calId, numeroAviso) {
+  try {
+    const hoje = new Date().toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    const novaDesc = (ev.description || "") + `\n[cobrado ${numeroAviso}x - ${hoje}]`;
+    await calendar.events.patch({
+      calendarId: calId,
+      eventId: ev.id,
+      requestBody: { description: novaDesc },
+    });
+    return true;
+  } catch (e) {
+    console.error("Erro ao marcar cobrança no evento", ev.id, e.message);
+    return false;
+  }
+}
+
+// monta a mensagem de cancelamento que seria enviada ao cliente (reserva liberada)
+function montarMensagemCancelamento(ev, calId) {
+  const inicio = new Date(ev.start.dateTime || ev.start.date);
+  const fim = new Date(ev.end.dateTime || ev.end.date);
+  const dataExtenso = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: 'numeric', month: 'long' });
+  const hi = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+  const hf = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+  const est = extrairEstudio(ev);
+  const textoEst = est ? `, no Estúdio ${est}` : "";
+  const nome = extrairNome(ev);
+  const saudacao = nome ? `Olá ${nome},` : "Olá,";
+  return `${saudacao} como não recebemos a confirmação, sua reserva de ${dataExtenso}, das ${hi} às ${hf}${textoEst}, foi liberada. 😊\nSe ainda tiver interesse, é só nos chamar que verificamos a disponibilidade!`;
+}
+
+// roda o ensaio. Se marcar=true, escreve [cobrado Nx] na descrição (só no automático das 8h)
+async function rodarEnsaioConfirmacoes(marcar = false) {
+  await sendMessage(ADMIN_CHAT_ID, `🧪 MODO ENSAIO${marcar ? " (automático)" : ""}: procurando reservas 'pré'...`);
   const achados = await coletarEventosPre(90);
   if (achados.length === 0) {
     await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva com 'pré' encontrada nos próximos 90 dias.");
     return;
   }
 
-  // separa por telefone: mesmo número = mesmo cliente (agrupa)
-  const grupos = {};      // telefone -> lista de {ev, calId}
-  const semTelefone = []; // sem número: ficam separados
-
+  // separa por estágio de aviso
+  const paraCobrar = [];       // 0 ou 1 aviso -> cobra
+  const paraCancelar = [];     // 2 avisos -> ensaio de cancelamento
   for (const item of achados) {
+    if (contarAvisos(item.ev) >= 2) paraCancelar.push(item);
+    else paraCobrar.push(item);
+  }
+
+  if (paraCobrar.length === 0 && paraCancelar.length === 0) {
+    await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva a processar hoje.");
+    return;
+  }
+
+  // agrupa por telefone: mesmo número = mesmo cliente
+  const grupos = {};
+  const semTelefone = [];
+  for (const item of paraCobrar) {
     const tel = extrairTelefone((item.ev.summary || "") + " " + (item.ev.description || ""));
-    if (tel) {
-      if (!grupos[tel]) grupos[tel] = [];
-      grupos[tel].push(item);
-    } else {
-      semTelefone.push(item);
-    }
+    if (tel) { (grupos[tel] = grupos[tel] || []).push(item); }
+    else semTelefone.push(item);
   }
 
   const totalClientes = Object.keys(grupos).length + semTelefone.length;
-  await sendMessage(ADMIN_CHAT_ID, `Encontrei ${achados.length} reserva(s) "pré", agrupadas em ${totalClientes} cliente(s). Abaixo, o que eu enviaria a cada um. NADA foi enviado. 👇`);
+  await sendMessage(ADMIN_CHAT_ID, `Encontrei ${paraCobrar.length} reserva(s) a cobrar, agrupadas em ${totalClientes} cliente(s). NADA foi enviado ao cliente. 👇`);
+
+  let marc1 = 0, marc2 = 0;
+
+  // marca uma lista de eventos (só se marcar=true)
+  async function marcarLista(eventos) {
+    if (!marcar) return;
+    for (const { ev, calId } of eventos) {
+      const proximo = contarAvisos(ev) + 1;
+      const ok = await marcarCobranca(ev, calId, proximo);
+      if (ok) { if (proximo === 1) marc1++; else marc2++; }
+    }
+  }
 
   // clientes COM telefone (agrupados)
   for (const tel of Object.keys(grupos)) {
+    const eventos = grupos[tel];
     try {
-      const eventos = grupos[tel];
       const msg = montarMensagemAgrupada(eventos);
       const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
-      const bloco = `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`;
-      await sendMessage(ADMIN_CHAT_ID, bloco);
+      await sendMessage(ADMIN_CHAT_ID, `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`);
     } catch (e) {
-      console.error("Erro ao montar bloco do telefone", tel, e.message);
       await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar o cliente ${tel}: ${e.message}`);
     }
-    await esperar(3000); // pausa de 3s entre mensagens para não sobrecarregar o WhatsApp
+    await marcarLista(eventos);
+    await esperar(3000);
   }
 
   // clientes SEM telefone (separados, um a um)
-  for (const { ev, calId } of semTelefone) {
+  for (const item of semTelefone) {
     try {
-      const msg = montarMensagemAgrupada([{ ev, calId }]);
-      const bloco = `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`;
-      await sendMessage(ADMIN_CHAT_ID, bloco);
+      const msg = montarMensagemAgrupada([item]);
+      await sendMessage(ADMIN_CHAT_ID, `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${item.ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`);
     } catch (e) {
-      console.error("Erro ao montar bloco de", ev.summary, e.message);
-      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar "${ev.summary || "(sem título)"}": ${e.message}`);
+      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar "${item.ev.summary || "(sem título)"}": ${e.message}`);
     }
-    await esperar(3000); // pausa de 3s entre mensagens
+    await marcarLista([item]);
+    await esperar(3000);
   }
 
-  await sendMessage(ADMIN_CHAT_ID, `✅ Fim do ensaio. ${totalClientes} cliente(s) processado(s).`);
+  // ENSAIO DE CANCELAMENTO — reservas com 2 avisos (3º dia). Só simula, não faz nada.
+  for (const { ev, calId } of paraCancelar) {
+    try {
+      const msgCliente = montarMensagemCancelamento(ev, calId);
+      const bloco =
+        `🛑 ENSAIO — CANCELAMENTO\n📌 ${ev.summary || "(sem título)"}\n\n` +
+        `Esta reserva atingiu 2 avisos. Agora eu:\n` +
+        `1️⃣ Enviaria esta mensagem ao cliente:\n"${msgCliente}"\n\n` +
+        `2️⃣ Moveria o evento para a agenda Cancelados.\n\n` +
+        `(Nada foi feito — apenas simulação.)`;
+      await sendMessage(ADMIN_CHAT_ID, bloco);
+    } catch (e) {
+      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro no cancelamento de "${ev.summary || "(sem título)"}": ${e.message}`);
+    }
+    await esperar(3000);
+  }
+
+  const resumoMarca = marcar
+    ? `\n📌 ${marc1} marcada(s) como 1ª cobrança\n📌 ${marc2} marcada(s) como 2ª cobrança`
+    : "\n(Modo teste: nada foi marcado na agenda.)";
+  const resumoCancel = paraCancelar.length
+    ? `\n🛑 ${paraCancelar.length} reserva(s) no estágio de cancelamento (simulado).`
+    : "";
+  await sendMessage(ADMIN_CHAT_ID, `✅ Fim do ensaio.${resumoMarca}${resumoCancel}`);
 }
 
 // =============================
@@ -490,6 +596,30 @@ client.on('message', async (msg) => {
         await listarSemTelefone();
         return;
       }
+      // 🔍 busca reservas por nome do cliente. Ex.: !buscar new star
+      if (textoMensagem.startsWith('!buscar')) {
+        const termo = msg.body.trim().slice(7).trim(); // texto depois de "!buscar"
+        if (!termo) {
+          await sendMessage(ADMIN_CHAT_ID, "Escreva o nome depois do comando. Ex.: !buscar new star");
+        } else {
+          await buscarPorNome(termo);
+        }
+        return;
+      }
+      // ❓ lista os comandos disponíveis
+      if (textoMensagem === '!ajuda') {
+        await sendMessage(ADMIN_CHAT_ID,
+          "🤖 *Comandos disponíveis:*\n\n" +
+          "!testar — mostra as cobranças (modo ensaio)\n" +
+          "!semtelefone — lista reservas sem telefone\n" +
+          "!buscar [nome] — busca reservas de um cliente\n" +
+          "!agenda — mostra a agenda dos próximos 15 dias\n" +
+          "!status — diz se o respondedor está ligado\n" +
+          "!ativar / !desativar — liga/desliga o respondedor\n" +
+          "!meuid — mostra seu ID"
+        );
+        return;
+      }
     }
 
     // Se o bot estiver pausado/desativado, ignora as mensagens e deixa você falar livremente
@@ -551,7 +681,7 @@ cron.schedule('0 8 * * *', async () => {
       console.log("WhatsApp não conectado, ensaio adiado.");
       return;
     }
-    await rodarEnsaioConfirmacoes();
+    await rodarEnsaioConfirmacoes(true); // automático das 8h: marca [cobrado Nx] na agenda
   } catch (e) {
     console.error("Erro no ensaio automático:", e.message);
   }
