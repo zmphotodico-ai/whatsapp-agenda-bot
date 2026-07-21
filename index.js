@@ -25,6 +25,14 @@ const CALENDAR_IDS = (process.env.CALENDAR_IDS || CALENDAR_ID)
 
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || "5511995540293@c.us";
 
+// Números autorizados a AGENDAR (admin + estúdio). Podem ser definidos na env AGENDADORES (separados por vírgula).
+const AGENDADORES = (process.env.AGENDADORES || "186564957212720@lid")
+  .split(",").map(s => s.trim()).filter(Boolean);
+// o admin também sempre pode agendar
+function podeAgendar(chatId) {
+  return chatId === ADMIN_CHAT_ID || AGENDADORES.includes(chatId);
+}
+
 // 🎛️ VARIÁVEL DE CONTROLE
 // Começa DESLIGADO de propósito: o robô sobe e lê a agenda, mas NÃO responde
 // clientes sozinho. Para ligar o respondedor, mande "!ativar" pelo WhatsApp de admin.
@@ -547,6 +555,127 @@ ${ocupacaoAtual}
 }
 
 // =============================
+// AGENDAMENTO (!agendar) — cria evento na agenda certa
+// =============================
+
+// guarda agendamentos aguardando confirmação (por chatId)
+const agendamentosPendentes = {};
+
+// mapa estúdio -> qual agenda (índice em CALENDAR_IDS): Aclimação=0, Bela Vista=1
+function agendaDoEstudio(est) {
+  const aclimacao = ["A", "B", "C", "D", "AB"];
+  const belavista = ["1", "2", "3"];
+  if (aclimacao.includes(est)) return { calId: CALENDAR_IDS[0], unidade: "Aclimação" };
+  if (belavista.includes(est)) return { calId: CALENDAR_IDS[1], unidade: "Bela Vista" };
+  return null;
+}
+
+// interpreta o texto do comando !agendar
+// formato: !agendar DD/MM HH-HH ESTUDIO NOME TELEFONE [pago VALOR]
+function interpretarAgendamento(texto) {
+  // tira o "!agendar" do começo
+  let resto = texto.replace(/^!agendar\s+/i, "").trim();
+
+  // captura "pago VALOR" no fim, se houver
+  let pago = null;
+  const mPago = resto.match(/\s+pago\s+r?\$?\s*([\d.,]+)\s*$/i);
+  if (mPago) {
+    pago = mPago[1].replace(",", ".");
+    resto = resto.slice(0, mPago.index).trim();
+  }
+
+  const partes = resto.split(/\s+/);
+  if (partes.length < 4) return { erro: "Faltam informações. Use: !agendar DD/MM HH-HH ESTUDIO NOME TELEFONE" };
+
+  const dataStr = partes[0];             // DD/MM
+  const horaStr = partes[1];             // HH-HH
+  const estudio = partes[2].toUpperCase(); // A, B, C, D, AB, 1, 2, 3
+
+  // telefone = última parte se for número; nome = o que está no meio
+  let telefone = null;
+  let nomeParts = partes.slice(3);
+  const ultima = nomeParts[nomeParts.length - 1];
+  if (/\d{4,}/.test(ultima)) {
+    telefone = ultima.replace(/\D/g, "");
+    nomeParts = nomeParts.slice(0, -1);
+  }
+  const nome = nomeParts.join(" ").trim();
+
+  // valida data DD/MM
+  const md = dataStr.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!md) return { erro: `Data inválida: "${dataStr}". Use DD/MM (ex.: 25/07).` };
+  const dia = parseInt(md[1]), mes = parseInt(md[2]);
+
+  // valida horário HH-HH
+  const mh = horaStr.match(/^(\d{1,2})(?::(\d{2}))?-(\d{1,2})(?::(\d{2}))?$/);
+  if (!mh) return { erro: `Horário inválido: "${horaStr}". Use HH-HH (ex.: 14-16 ou 14:30-16:30).` };
+  const h1 = parseInt(mh[1]), m1 = parseInt(mh[2] || "0");
+  const h2 = parseInt(mh[3]), m2 = parseInt(mh[4] || "0");
+
+  // valida estúdio
+  const ag = agendaDoEstudio(estudio);
+  if (!ag) return { erro: `Estúdio inválido: "${estudio}". Use A, B, C, D, AB (Aclimação) ou 1, 2, 3 (Bela Vista).` };
+
+  if (!nome) return { erro: "Faltou o nome do cliente." };
+
+  // monta as datas (ano atual; se o mês já passou, assume próximo ano)
+  const agora = new Date();
+  let ano = agora.getFullYear();
+  const inicio = new Date(ano, mes - 1, dia, h1, m1);
+  if (inicio < agora && (agora - inicio) > 7 * 24 * 3600 * 1000) {
+    // se a data ficou muito no passado, provavelmente é ano que vem
+    inicio.setFullYear(ano + 1);
+  }
+  const fim = new Date(inicio);
+  fim.setHours(h2, m2);
+
+  return { dia, mes, estudio, nome, telefone, pago, inicio, fim, ...ag };
+}
+
+// checa se o estúdio já está ocupado no horário (nas agendas de cobrança)
+async function horarioOcupado(calId, estudio, inicio, fim) {
+  try {
+    const res = await calendar.events.list({
+      calendarId: calId,
+      timeMin: new Date(inicio.getTime() - 60000).toISOString(),
+      timeMax: new Date(fim.getTime() + 60000).toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+    for (const ev of (res.data.items || [])) {
+      if (extrairEstudio(ev) === estudio) {
+        const ei = new Date(ev.start.dateTime || ev.start.date);
+        const ef = new Date(ev.end.dateTime || ev.end.date);
+        // há sobreposição?
+        if (inicio < ef && fim > ei) return ev;
+      }
+    }
+    return null;
+  } catch (e) {
+    console.error("Erro ao checar conflito:", e.message);
+    return null;
+  }
+}
+
+// cria o evento de verdade na agenda
+async function criarEvento(dados) {
+  const titulo = `${dados.inicio.getHours()}-${dados.fim.getHours()}/${dados.estudio}${dados.pago ? "" : " pré"}`;
+  let descricao = dados.nome;
+  if (dados.telefone) descricao += ` ${dados.telefone}`;
+  if (dados.pago) descricao += `\npago R$${dados.pago}`;
+  await calendar.events.insert({
+    calendarId: dados.calId,
+    requestBody: {
+      summary: titulo,
+      description: descricao,
+      start: { dateTime: dados.inicio.toISOString(), timeZone: "America/Sao_Paulo" },
+      end: { dateTime: dados.fim.toISOString(), timeZone: "America/Sao_Paulo" },
+    },
+  });
+  return titulo;
+}
+
+// =============================
 // PROCESSAMENTO DE MENSAGENS
 // =============================
 client.on('message', async (msg) => {
@@ -561,6 +690,58 @@ client.on('message', async (msg) => {
     if (textoMensagem === '!meuid') {
       await sendMessage(chatId, `Seu ID é:\n${chatId}\n\nÉ esse valor exato que deve ir no ADMIN_CHAT_ID.`);
       return;
+    }
+
+    // 📅 AGENDAMENTO — quem pode agendar (admin + estúdio)
+    if (podeAgendar(chatId)) {
+      // confirmação de um agendamento pendente
+      if (textoMensagem === 'sim' && agendamentosPendentes[chatId]) {
+        const dados = agendamentosPendentes[chatId];
+        delete agendamentosPendentes[chatId];
+        try {
+          const titulo = await criarEvento(dados);
+          await sendMessage(chatId, `✅ Agendado com sucesso!\n📌 ${titulo}\n📍 ${dados.unidade}\n👤 ${dados.nome}${dados.telefone ? " · " + dados.telefone : ""}${dados.pago ? `\n💰 pago R$${dados.pago}` : "\n(pré-reserva)"}`);
+        } catch (e) {
+          await sendMessage(chatId, `❌ Erro ao criar o evento: ${e.message}`);
+        }
+        return;
+      }
+      if (textoMensagem === 'nao' || textoMensagem === 'não') {
+        if (agendamentosPendentes[chatId]) {
+          delete agendamentosPendentes[chatId];
+          await sendMessage(chatId, "Ok, agendamento cancelado. 👍");
+          return;
+        }
+      }
+
+      if (textoMensagem.startsWith('!agendar')) {
+        const dados = interpretarAgendamento(msg.body.trim());
+        if (dados.erro) {
+          await sendMessage(chatId, `⚠️ ${dados.erro}`);
+          return;
+        }
+        // checa conflito de horário
+        const conflito = await horarioOcupado(dados.calId, dados.estudio, dados.inicio, dados.fim);
+        if (conflito) {
+          const ci = new Date(conflito.start.dateTime || conflito.start.date);
+          const cf = new Date(conflito.end.dateTime || conflito.end.date);
+          const hi = ci.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+          const hf = cf.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+          await sendMessage(chatId, `❌ Esse estúdio já está ocupado nesse horário!\nJá existe: "${conflito.summary}" das ${hi} às ${hf}.\n\nNão agendei nada. Verifique.`);
+          return;
+        }
+        // guarda como pendente e pede confirmação
+        agendamentosPendentes[chatId] = dados;
+        const dataFmt = dados.inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: '2-digit', month: '2-digit' });
+        const hi = dados.inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+        const hf = dados.fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+        await sendMessage(chatId,
+          `📋 Confirma este agendamento?\n\n` +
+          `📅 ${dataFmt}\n🕐 ${hi} às ${hf}\n📸 Estúdio ${dados.estudio} (${dados.unidade})\n👤 ${dados.nome}\n📞 ${dados.telefone || "⚠️ sem telefone"}\n${dados.pago ? `💰 pago R$${dados.pago}` : "🔖 pré-reserva"}\n\n` +
+          `Responda *SIM* para confirmar ou *NÃO* para cancelar.`
+        );
+        return;
+      }
     }
 
     // 🔒 COMANDOS EXCLUSIVOS DO ADMIN PARA CONTROLAR O BOT
