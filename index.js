@@ -558,8 +558,9 @@ ${ocupacaoAtual}
 // AGENDAMENTO (!agendar) — cria evento na agenda certa
 // =============================
 
-// guarda agendamentos aguardando confirmação (por chatId)
-const agendamentosPendentes = {};
+// guarda conversas de agendamento em andamento (por chatId)
+// cada conversa tem: { passo, dados }
+const conversasAgendamento = {};
 
 // mapa estúdio -> qual agenda (índice em CALENDAR_IDS): Aclimação=0, Bela Vista=1
 function agendaDoEstudio(est) {
@@ -570,66 +571,45 @@ function agendaDoEstudio(est) {
   return null;
 }
 
-// interpreta o texto do comando !agendar
-// formato: !agendar DD/MM HH-HH ESTUDIO NOME TELEFONE [pago VALOR]
-function interpretarAgendamento(texto) {
-  // tira o "!agendar" do começo
-  let resto = texto.replace(/^!agendar\s+/i, "").trim();
-
-  // captura "pago VALOR" no fim, se houver
-  let pago = null;
-  const mPago = resto.match(/\s+pago\s+r?\$?\s*([\d.,]+)\s*$/i);
-  if (mPago) {
-    pago = mPago[1].replace(",", ".");
-    resto = resto.slice(0, mPago.index).trim();
-  }
-
-  const partes = resto.split(/\s+/);
-  if (partes.length < 4) return { erro: "Faltam informações. Use: !agendar DD/MM HH-HH ESTUDIO NOME TELEFONE" };
-
-  const dataStr = partes[0];             // DD/MM
-  const horaStr = partes[1];             // HH-HH
-  const estudio = partes[2].toUpperCase(); // A, B, C, D, AB, 1, 2, 3
-
-  // telefone = última parte se for número; nome = o que está no meio
-  let telefone = null;
-  let nomeParts = partes.slice(3);
-  const ultima = nomeParts[nomeParts.length - 1];
-  if (/\d{4,}/.test(ultima)) {
-    telefone = ultima.replace(/\D/g, "");
-    nomeParts = nomeParts.slice(0, -1);
-  }
-  const nome = nomeParts.join(" ").trim();
-
-  // valida data DD/MM
-  const md = dataStr.match(/^(\d{1,2})\/(\d{1,2})$/);
-  if (!md) return { erro: `Data inválida: "${dataStr}". Use DD/MM (ex.: 25/07).` };
+// valida uma DATA no formato DD/MM. Retorna {dia, mes} ou null
+function validarData(txt) {
+  const md = (txt || "").trim().match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!md) return null;
   const dia = parseInt(md[1]), mes = parseInt(md[2]);
+  if (dia < 1 || dia > 31 || mes < 1 || mes > 12) return null;
+  return { dia, mes };
+}
 
-  // valida horário HH-HH
-  const mh = horaStr.match(/^(\d{1,2})(?::(\d{2}))?-(\d{1,2})(?::(\d{2}))?$/);
-  if (!mh) return { erro: `Horário inválido: "${horaStr}". Use HH-HH (ex.: 14-16 ou 14:30-16:30).` };
+// valida um HORÁRIO no formato HH-HH (ou HH:MM-HH:MM). Retorna {h1,m1,h2,m2} ou null
+function validarHorario(txt) {
+  const mh = (txt || "").trim().match(/^(\d{1,2})(?::(\d{2}))?\s*-\s*(\d{1,2})(?::(\d{2}))?$/);
+  if (!mh) return null;
   const h1 = parseInt(mh[1]), m1 = parseInt(mh[2] || "0");
   const h2 = parseInt(mh[3]), m2 = parseInt(mh[4] || "0");
+  if (h1 > 23 || h2 > 23 || m1 > 59 || m2 > 59) return null;
+  return { h1, m1, h2, m2 };
+}
 
-  // valida estúdio
+// valida o ESTÚDIO. Retorna {estudio, calId, unidade} ou null
+function validarEstudio(txt) {
+  const estudio = (txt || "").trim().toUpperCase();
   const ag = agendaDoEstudio(estudio);
-  if (!ag) return { erro: `Estúdio inválido: "${estudio}". Use A, B, C, D, AB (Aclimação) ou 1, 2, 3 (Bela Vista).` };
+  if (!ag) return null;
+  return { estudio, ...ag };
+}
 
-  if (!nome) return { erro: "Faltou o nome do cliente." };
-
-  // monta as datas (ano atual; se o mês já passou, assume próximo ano)
+// monta as datas de início e fim a partir dos dados coletados
+function montarDatas(dados) {
   const agora = new Date();
-  let ano = agora.getFullYear();
-  const inicio = new Date(ano, mes - 1, dia, h1, m1);
+  const ano = agora.getFullYear();
+  const inicio = new Date(ano, dados.mes - 1, dados.dia, dados.h1, dados.m1);
+  // se a data ficou muito no passado, provavelmente é do ano que vem
   if (inicio < agora && (agora - inicio) > 7 * 24 * 3600 * 1000) {
-    // se a data ficou muito no passado, provavelmente é ano que vem
     inicio.setFullYear(ano + 1);
   }
   const fim = new Date(inicio);
-  fim.setHours(h2, m2);
-
-  return { dia, mes, estudio, nome, telefone, pago, inicio, fim, ...ag };
+  fim.setHours(dados.h2, dados.m2);
+  return { inicio, fim };
 }
 
 // checa se o estúdio já está ocupado no horário (nas agendas de cobrança)
@@ -655,6 +635,20 @@ async function horarioOcupado(calId, estudio, inicio, fim) {
     console.error("Erro ao checar conflito:", e.message);
     return null;
   }
+}
+
+// cria o evento de verdade na agenda
+// envia o resumo do agendamento para confirmação
+async function enviarResumoAgendamento(chatId, d) {
+  const { inicio, fim } = montarDatas(d);
+  const dataFmt = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: '2-digit', month: '2-digit' });
+  const hi = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+  const hf = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+  await sendMessage(chatId,
+    `📋 *Confirma este agendamento?*\n\n` +
+    `📅 ${dataFmt}\n🕐 ${hi} às ${hf}\n📸 Estúdio ${d.estudio} (${d.unidade})\n👤 ${d.nome}\n📞 ${d.telefone}\n${d.pago ? `💰 pago R$${d.pago}` : "🔖 pré-reserva"}\n\n` +
+    `Responda *SIM* para confirmar ou *NÃO* para cancelar.`
+  );
 }
 
 // cria o evento de verdade na agenda
@@ -692,55 +686,130 @@ client.on('message', async (msg) => {
       return;
     }
 
-    // 📅 AGENDAMENTO — quem pode agendar (admin + estúdio)
+    // 📅 AGENDAMENTO GUIADO — quem pode agendar (admin + estúdio)
     if (podeAgendar(chatId)) {
-      // confirmação de um agendamento pendente
-      if (textoMensagem === 'sim' && agendamentosPendentes[chatId]) {
-        const dados = agendamentosPendentes[chatId];
-        delete agendamentosPendentes[chatId];
-        try {
-          const titulo = await criarEvento(dados);
-          await sendMessage(chatId, `✅ Agendado com sucesso!\n📌 ${titulo}\n📍 ${dados.unidade}\n👤 ${dados.nome}${dados.telefone ? " · " + dados.telefone : ""}${dados.pago ? `\n💰 pago R$${dados.pago}` : "\n(pré-reserva)"}`);
-        } catch (e) {
-          await sendMessage(chatId, `❌ Erro ao criar o evento: ${e.message}`);
-        }
+      const textoOriginal = msg.body.trim();
+
+      // cancelar a qualquer momento
+      if (conversasAgendamento[chatId] && textoMensagem === 'cancelar') {
+        delete conversasAgendamento[chatId];
+        await sendMessage(chatId, "Agendamento cancelado. 👍");
         return;
-      }
-      if (textoMensagem === 'nao' || textoMensagem === 'não') {
-        if (agendamentosPendentes[chatId]) {
-          delete agendamentosPendentes[chatId];
-          await sendMessage(chatId, "Ok, agendamento cancelado. 👍");
-          return;
-        }
       }
 
-      if (textoMensagem.startsWith('!agendar')) {
-        const dados = interpretarAgendamento(msg.body.trim());
-        if (dados.erro) {
-          await sendMessage(chatId, `⚠️ ${dados.erro}`);
-          return;
-        }
-        // checa conflito de horário
-        const conflito = await horarioOcupado(dados.calId, dados.estudio, dados.inicio, dados.fim);
-        if (conflito) {
-          const ci = new Date(conflito.start.dateTime || conflito.start.date);
-          const cf = new Date(conflito.end.dateTime || conflito.end.date);
-          const hi = ci.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-          const hf = cf.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-          await sendMessage(chatId, `❌ Esse estúdio já está ocupado nesse horário!\nJá existe: "${conflito.summary}" das ${hi} às ${hf}.\n\nNão agendei nada. Verifique.`);
-          return;
-        }
-        // guarda como pendente e pede confirmação
-        agendamentosPendentes[chatId] = dados;
-        const dataFmt = dados.inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: '2-digit', month: '2-digit' });
-        const hi = dados.inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-        const hf = dados.fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-        await sendMessage(chatId,
-          `📋 Confirma este agendamento?\n\n` +
-          `📅 ${dataFmt}\n🕐 ${hi} às ${hf}\n📸 Estúdio ${dados.estudio} (${dados.unidade})\n👤 ${dados.nome}\n📞 ${dados.telefone || "⚠️ sem telefone"}\n${dados.pago ? `💰 pago R$${dados.pago}` : "🔖 pré-reserva"}\n\n` +
-          `Responda *SIM* para confirmar ou *NÃO* para cancelar.`
-        );
+      // inicia o fluxo
+      if (textoMensagem === '!agendar') {
+        conversasAgendamento[chatId] = { passo: 'data', dados: {} };
+        await sendMessage(chatId, "📅 *Novo agendamento*\n\nQual a *data*? (ex: 25/07)\n\n_(escreva 'cancelar' a qualquer momento para desistir)_");
         return;
+      }
+
+      // se há uma conversa em andamento, trata a resposta do passo atual
+      if (conversasAgendamento[chatId]) {
+        const conversa = conversasAgendamento[chatId];
+        const d = conversa.dados;
+
+        if (conversa.passo === 'data') {
+          const v = validarData(textoOriginal);
+          if (!v) { await sendMessage(chatId, "⚠️ Data inválida. Use o formato DD/MM (ex: 25/07). Tente de novo:"); return; }
+          d.dia = v.dia; d.mes = v.mes;
+          conversa.passo = 'horario';
+          await sendMessage(chatId, "🕐 Qual o *horário*? (ex: 14-16 ou 14:30-16:30)");
+          return;
+        }
+
+        if (conversa.passo === 'horario') {
+          const v = validarHorario(textoOriginal);
+          if (!v) { await sendMessage(chatId, "⚠️ Horário inválido. Use HH-HH (ex: 14-16). Tente de novo:"); return; }
+          d.h1 = v.h1; d.m1 = v.m1; d.h2 = v.h2; d.m2 = v.m2;
+          conversa.passo = 'estudio';
+          await sendMessage(chatId, "📸 Qual o *estúdio*?\n\nAclimação: A, B, C, D, AB\nBela Vista: 1, 2, 3");
+          return;
+        }
+
+        if (conversa.passo === 'estudio') {
+          const v = validarEstudio(textoOriginal);
+          if (!v) { await sendMessage(chatId, "⚠️ Estúdio inválido. Escreva A, B, C, D, AB, 1, 2 ou 3. Tente de novo:"); return; }
+          d.estudio = v.estudio; d.calId = v.calId; d.unidade = v.unidade;
+          conversa.passo = 'nome';
+          await sendMessage(chatId, "👤 Qual o *nome* do cliente?");
+          return;
+        }
+
+        if (conversa.passo === 'nome') {
+          if (!textoOriginal || textoOriginal.length < 2) { await sendMessage(chatId, "⚠️ Escreva o nome do cliente:"); return; }
+          d.nome = textoOriginal;
+          conversa.passo = 'telefone';
+          await sendMessage(chatId, "📞 Qual o *telefone*? (com DDD, ex: 11999998888)");
+          return;
+        }
+
+        if (conversa.passo === 'telefone') {
+          const num = textoOriginal.replace(/\D/g, "");
+          if (num.length < 10) { await sendMessage(chatId, "⚠️ Telefone inválido. Digite com DDD (ex: 11999998888):"); return; }
+          d.telefone = num;
+          conversa.passo = 'pagamento';
+          await sendMessage(chatId, "💰 É *pré-reserva* ou já foi *pago*?\n\nEscreva 'pré' ou 'pago'");
+          return;
+        }
+
+        if (conversa.passo === 'pagamento') {
+          if (textoMensagem === 'pre' || textoMensagem === 'pré') {
+            d.pago = null;
+            conversa.passo = 'confirmar';
+            await enviarResumoAgendamento(chatId, d);
+            return;
+          }
+          if (textoMensagem === 'pago') {
+            conversa.passo = 'valor';
+            await sendMessage(chatId, "💵 Qual o *valor pago*? (ex: 210)");
+            return;
+          }
+          await sendMessage(chatId, "⚠️ Escreva 'pré' ou 'pago':");
+          return;
+        }
+
+        if (conversa.passo === 'valor') {
+          const valor = textoOriginal.replace(/[^\d.,]/g, "").replace(",", ".");
+          if (!valor) { await sendMessage(chatId, "⚠️ Valor inválido. Digite só o número (ex: 210):"); return; }
+          d.pago = valor;
+          conversa.passo = 'confirmar';
+          await enviarResumoAgendamento(chatId, d);
+          return;
+        }
+
+        if (conversa.passo === 'confirmar') {
+          if (textoMensagem === 'sim') {
+            const { inicio, fim } = montarDatas(d);
+            d.inicio = inicio; d.fim = fim;
+            // checa conflito antes de criar
+            const conflito = await horarioOcupado(d.calId, d.estudio, inicio, fim);
+            if (conflito) {
+              const ci = new Date(conflito.start.dateTime || conflito.start.date);
+              const cf = new Date(conflito.end.dateTime || conflito.end.date);
+              const hi = ci.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+              const hf = cf.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+              await sendMessage(chatId, `❌ Esse estúdio já está ocupado nesse horário!\nJá existe: "${conflito.summary}" das ${hi} às ${hf}.\n\nNão agendei nada.`);
+              delete conversasAgendamento[chatId];
+              return;
+            }
+            try {
+              const titulo = await criarEvento(d);
+              await sendMessage(chatId, `✅ *Agendado com sucesso!*\n📌 ${titulo}\n📍 ${d.unidade}\n👤 ${d.nome} · ${d.telefone}${d.pago ? `\n💰 pago R$${d.pago}` : "\n🔖 pré-reserva"}`);
+            } catch (e) {
+              await sendMessage(chatId, `❌ Erro ao criar o evento: ${e.message}`);
+            }
+            delete conversasAgendamento[chatId];
+            return;
+          }
+          if (textoMensagem === 'nao' || textoMensagem === 'não') {
+            delete conversasAgendamento[chatId];
+            await sendMessage(chatId, "Agendamento cancelado. 👍");
+            return;
+          }
+          await sendMessage(chatId, "Responda *SIM* para confirmar ou *NÃO* para cancelar:");
+          return;
+        }
       }
     }
 
