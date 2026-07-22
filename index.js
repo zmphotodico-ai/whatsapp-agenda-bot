@@ -98,6 +98,22 @@ function esperar(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Números de TESTE da equipe — recebem as mensagens de cobrança DE VERDADE (para validar o fluxo real).
+// Todos os outros continuam em modo ensaio (só o admin vê). Definível via env NUMEROS_TESTE.
+const NUMEROS_TESTE = (process.env.NUMEROS_TESTE ||
+  "5532991590828,5511995540293,5511973776098,5511998622830,5511999951338")
+  .split(",").map(s => s.trim()).filter(Boolean);
+
+function ehNumeroDeTeste(telefone) {
+  if (!telefone) return false;
+  return NUMEROS_TESTE.includes(telefone);
+}
+
+// monta o chatId do WhatsApp a partir de um telefone (formato 55DDDNÚMERO)
+function telefoneParaChatId(telefone) {
+  return `${telefone}@c.us`;
+}
+
 // ✅ NOVO: lê TODAS as agendas de CALENDAR_IDS, junta e ordena por horário
 async function getAgendaOcupada() {
   try {
@@ -412,6 +428,25 @@ function montarMensagemCancelamento(ev, calId) {
   return `${saudacao} como não recebemos a confirmação, sua reserva de ${dataExtenso}, das ${hi} às ${hf}${textoEst}, foi liberada. 😊\nSe ainda tiver interesse, é só nos chamar que verificamos a disponibilidade!`;
 }
 
+// move um evento de verdade para a agenda Cancelados (3ª posição em CALENDAR_IDS)
+async function moverParaCancelados(ev, calIdOrigem) {
+  const calIdDestino = CALENDAR_IDS[2];
+  if (!calIdDestino) throw new Error("Agenda Cancelados não configurada (falta o 3º ID em CALENDAR_IDS).");
+  // cria uma cópia na agenda Cancelados
+  await calendar.events.insert({
+    calendarId: calIdDestino,
+    requestBody: {
+      summary: ev.summary,
+      description: (ev.description || "") + "\n[cancelado automaticamente - sem confirmação em 2 avisos]",
+      start: ev.start,
+      end: ev.end,
+      colorId: ev.colorId,
+    },
+  });
+  // apaga da agenda de origem
+  await calendar.events.delete({ calendarId: calIdOrigem, eventId: ev.id });
+}
+
 // roda o ensaio. Se marcar=true, escreve [cobrado Nx] na descrição (só no automático das 8h)
 async function rodarEnsaioConfirmacoes(marcar = false) {
   await sendMessage(ADMIN_CHAT_ID, `🧪 MODO ENSAIO${marcar ? " (automático)" : ""}: procurando reservas 'pré'...`);
@@ -464,7 +499,14 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
     try {
       const msg = montarMensagemAgrupada(eventos);
       const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
-      await sendMessage(ADMIN_CHAT_ID, `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`);
+
+      if (ehNumeroDeTeste(tel)) {
+        // TESTE: envia de verdade para o número da equipe, e avisa o admin
+        await sendMessage(telefoneParaChatId(tel), msg);
+        await sendMessage(ADMIN_CHAT_ID, `🧪 [TESTE REAL] Enviado de verdade para ${tel}${qtd}:\n\n${msg}`);
+      } else {
+        await sendMessage(ADMIN_CHAT_ID, `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`);
+      }
     } catch (e) {
       await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar o cliente ${tel}: ${e.message}`);
     }
@@ -484,17 +526,30 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
     await esperar(3000);
   }
 
-  // ENSAIO DE CANCELAMENTO — reservas com 2 avisos (3º dia). Só simula, não faz nada.
+  // CANCELAMENTO — reservas com 2 avisos (3º dia).
+  // Para números de TESTE: ação real (envia + move para Cancelados). Para os demais: só ensaio.
   for (const { ev, calId } of paraCancelar) {
     try {
+      const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
       const msgCliente = montarMensagemCancelamento(ev, calId);
-      const bloco =
-        `🛑 ENSAIO — CANCELAMENTO\n📌 ${ev.summary || "(sem título)"}\n\n` +
-        `Esta reserva atingiu 2 avisos. Agora eu:\n` +
-        `1️⃣ Enviaria esta mensagem ao cliente:\n"${msgCliente}"\n\n` +
-        `2️⃣ Moveria o evento para a agenda Cancelados.\n\n` +
-        `(Nada foi feito — apenas simulação.)`;
-      await sendMessage(ADMIN_CHAT_ID, bloco);
+
+      if (ehNumeroDeTeste(tel)) {
+        // AÇÃO REAL: envia a mensagem de verdade e move o evento para Cancelados
+        await sendMessage(telefoneParaChatId(tel), msgCliente);
+        await moverParaCancelados(ev, calId);
+        await sendMessage(ADMIN_CHAT_ID,
+          `🧪 [TESTE REAL] CANCELAMENTO executado para ${tel}\n📌 ${ev.summary || "(sem título)"}\n\n` +
+          `✅ Mensagem enviada ao cliente.\n✅ Evento movido para a agenda Cancelados.`
+        );
+      } else {
+        const bloco =
+          `🛑 ENSAIO — CANCELAMENTO\n📌 ${ev.summary || "(sem título)"}\n\n` +
+          `Esta reserva atingiu 2 avisos. Agora eu:\n` +
+          `1️⃣ Enviaria esta mensagem ao cliente:\n"${msgCliente}"\n\n` +
+          `2️⃣ Moveria o evento para a agenda Cancelados.\n\n` +
+          `(Nada foi feito — apenas simulação.)`;
+        await sendMessage(ADMIN_CHAT_ID, bloco);
+      }
     } catch (e) {
       await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro no cancelamento de "${ev.summary || "(sem título)"}": ${e.message}`);
     }
