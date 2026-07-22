@@ -599,16 +599,21 @@ function validarEstudio(txt) {
 }
 
 // monta as datas de início e fim a partir dos dados coletados
+// IMPORTANTE: cria já no fuso de São Paulo (-03:00), senão o servidor (UTC) grava 3h a menos
 function montarDatas(dados) {
   const agora = new Date();
-  const ano = agora.getFullYear();
-  const inicio = new Date(ano, dados.mes - 1, dados.dia, dados.h1, dados.m1);
+  let ano = agora.getFullYear();
+  const p = (n) => String(n).padStart(2, "0");
+  const montaISO = (a) =>
+    `${a}-${p(dados.mes)}-${p(dados.dia)}T${p(dados.h1)}:${p(dados.m1)}:00-03:00`;
+
+  let inicio = new Date(montaISO(ano));
   // se a data ficou muito no passado, provavelmente é do ano que vem
   if (inicio < agora && (agora - inicio) > 7 * 24 * 3600 * 1000) {
-    inicio.setFullYear(ano + 1);
+    ano = ano + 1;
+    inicio = new Date(montaISO(ano));
   }
-  const fim = new Date(inicio);
-  fim.setHours(dados.h2, dados.m2);
+  const fim = new Date(`${ano}-${p(dados.mes)}-${p(dados.dia)}T${p(dados.h2)}:${p(dados.m2)}:00-03:00`);
   return { inicio, fim };
 }
 
@@ -638,6 +643,46 @@ async function horarioOcupado(calId, estudio, inicio, fim) {
 }
 
 // cria o evento de verdade na agenda
+// endereços completos das unidades (usados na mensagem pronta para o cliente)
+const ENDERECO_ACLIMACAO = "Rua Gualaxo, 206 - Aclimação/Liberdade - CEP 01533-020";
+const ENDERECO_BELAVISTA = "Rua Santa Madalena, 46 - Bela Vista";
+
+// calcula o sinal para um agendamento novo (mesma regra da cobrança)
+function calcularSinalAgendamento(d, inicio, fim) {
+  const horas = (fim - inicio) / (1000 * 60 * 60);
+  if (!horas || horas <= 0) return null;
+  const diaTxt = inicio.toLocaleDateString("en-US", { timeZone: "America/Sao_Paulo", weekday: "short" });
+  const periodo = (diaTxt === "Sat" || diaTxt === "Sun") ? "fds" : "semana";
+  const unidade = (d.unidade === "Aclimação") ? "aclimacao" : "belavista";
+  const valorHora = TABELA_PRECOS[unidade][periodo][d.estudio];
+  if (!valorHora) return null;
+  const total = Math.round(horas * valorHora);
+  let sinal = Math.floor((total / 3) / 10) * 10;
+  if (sinal < 50) sinal = 50;
+  return sinal;
+}
+
+// monta a mensagem PRONTA para a equipe encaminhar ao cliente
+function montarMensagemParaCliente(d, inicio, fim) {
+  const dataExtenso = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: 'numeric', month: 'long' });
+  const hi = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+  const hf = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+  const endereco = (d.unidade === "Aclimação") ? ENDERECO_ACLIMACAO : ENDERECO_BELAVISTA;
+  const primeiroNome = (d.nome || "").split(" ")[0];
+
+  // se já foi pago, confirma a reserva. Se não, pede o sinal.
+  if (d.pago) {
+    return `Obrigado ${primeiroNome}! 😊\nReserva confirmada: Estúdio ${d.estudio}, ${dataExtenso}, das ${hi} às ${hf}.\n${endereco}\n\nPagamento de R$ ${d.pago} recebido. Até lá!`;
+  }
+
+  const sinal = calcularSinalAgendamento(d, inicio, fim);
+  const linhaSinal = sinal
+    ? `\n\nPara fazer a reserva pedimos R$ ${sinal} antecipado, ok?`
+    : `\n\nPara fazer a reserva pedimos o sinal antecipado, ok?`;
+
+  return `Obrigado ${primeiroNome}! 😊\nPré-marcado Estúdio ${d.estudio}, ${dataExtenso}, das ${hi} às ${hf}.\n${endereco}${linhaSinal}\n\nPIX: zmphoto@zmphoto.com.br\nou CNPJ 43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
+}
+
 // envia o resumo do agendamento para confirmação
 async function enviarResumoAgendamento(chatId, d) {
   const { inicio, fim } = montarDatas(d);
@@ -653,7 +698,8 @@ async function enviarResumoAgendamento(chatId, d) {
 
 // cria o evento de verdade na agenda
 async function criarEvento(dados) {
-  const titulo = `${dados.inicio.getHours()}-${dados.fim.getHours()}/${dados.estudio}${dados.pago ? "" : " pré"}`;
+  const hTitulo = (h, m) => (m ? `${h}:${String(m).padStart(2, "0")}` : `${h}`);
+  const titulo = `${hTitulo(dados.h1, dados.m1)}-${hTitulo(dados.h2, dados.m2)}/${dados.estudio}${dados.pago ? "" : " pré"}`;
   let descricao = dados.nome;
   if (dados.telefone) descricao += ` ${dados.telefone}`;
   if (dados.pago) descricao += `\npago R$${dados.pago}`;
@@ -795,7 +841,9 @@ client.on('message', async (msg) => {
             }
             try {
               const titulo = await criarEvento(d);
-              await sendMessage(chatId, `✅ *Agendado com sucesso!*\n📌 ${titulo}\n📍 ${d.unidade}\n👤 ${d.nome} · ${d.telefone}${d.pago ? `\n💰 pago R$${d.pago}` : "\n🔖 pré-reserva"}`);
+              await sendMessage(chatId, `✅ *Agendado com sucesso!*\n📌 ${titulo}\n📍 ${d.unidade}\n👤 ${d.nome} · ${d.telefone}${d.pago ? `\n💰 pago R$${d.pago}` : "\n🔖 pré-reserva"}\n\n👇 Abaixo, a mensagem pronta para encaminhar ao cliente:`);
+              await esperar(1500);
+              await sendMessage(chatId, montarMensagemParaCliente(d, inicio, fim));
             } catch (e) {
               await sendMessage(chatId, `❌ Erro ao criar o evento: ${e.message}`);
             }
