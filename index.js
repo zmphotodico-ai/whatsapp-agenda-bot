@@ -718,6 +718,39 @@ async function criarEvento(dados) {
 // =============================
 // PROCESSAMENTO DE MENSAGENS
 // =============================
+// MEMÓRIA DE CLIENTES — varre as agendas e monta um dicionário nome -> telefone
+// (não é um banco separado; usa a própria agenda como fonte, sempre atualizada)
+async function buscarTelefoneConhecido(nomeBuscado) {
+  const alvo = normalizar(nomeBuscado);
+  if (!alvo) return null;
+  const agora = new Date();
+  const limite = new Date(agora.getTime() - 180 * 24 * 60 * 60 * 1000); // últimos 180 dias pra trás
+  const futuro = new Date(agora.getTime() + 180 * 24 * 60 * 60 * 1000); // e 180 dias pra frente
+
+  for (const calId of CALENDAR_IDS.slice(0, 2)) {
+    try {
+      const res = await calendar.events.list({
+        calendarId: calId,
+        timeMin: limite.toISOString(),
+        timeMax: futuro.toISOString(),
+        singleEvents: true,
+      });
+      for (const ev of (res.data.items || [])) {
+        const nomeEv = extrairNome(ev);
+        const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
+        if (nomeEv && tel) {
+          const nomeNorm = normalizar(nomeEv);
+          // considera "conhecido" se o nome bate exatamente ou um contém o outro
+          if (nomeNorm === alvo || nomeNorm.includes(alvo) || alvo.includes(nomeNorm)) {
+            return { nome: nomeEv, telefone: tel };
+          }
+        }
+      }
+    } catch (e) { console.error("Erro ao buscar telefone conhecido:", e.message); }
+  }
+  return null;
+}
+
 client.on('message', async (msg) => {
   try {
     const chatId = msg.from;
@@ -785,8 +818,36 @@ client.on('message', async (msg) => {
         if (conversa.passo === 'nome') {
           if (!textoOriginal || textoOriginal.length < 2) { await sendMessage(chatId, "⚠️ Escreva o nome do cliente:"); return; }
           d.nome = textoOriginal;
+
+          // tenta achar telefone conhecido desse cliente nas agendas
+          const conhecido = await buscarTelefoneConhecido(textoOriginal);
+          if (conhecido) {
+            d._telefoneSugerido = conhecido.telefone;
+            conversa.passo = 'confirmarTelefoneConhecido';
+            await sendMessage(chatId, `📱 Já tenho o telefone *${conhecido.telefone}* de "${conhecido.nome}" em outra reserva.\nÉ esse mesmo? Responda *SIM* ou digite o telefone correto.`);
+            return;
+          }
+
           conversa.passo = 'telefone';
           await sendMessage(chatId, "📞 Qual o *telefone*? (com DDD, ex: 11999998888)");
+          return;
+        }
+
+        if (conversa.passo === 'confirmarTelefoneConhecido') {
+          if (textoMensagem === 'sim') {
+            d.telefone = d._telefoneSugerido;
+            delete d._telefoneSugerido;
+            conversa.passo = 'pagamento';
+            await sendMessage(chatId, "💰 É *pré-reserva* ou já foi *pago*?\n\nEscreva 'pré' ou 'pago'");
+            return;
+          }
+          // se não digitou "sim", tenta usar o que ela mandou como o telefone certo
+          const num = textoOriginal.replace(/\D/g, "");
+          if (num.length < 10) { await sendMessage(chatId, "⚠️ Responda *SIM* para usar o telefone sugerido, ou digite o telefone correto (com DDD):"); return; }
+          d.telefone = num;
+          delete d._telefoneSugerido;
+          conversa.passo = 'pagamento';
+          await sendMessage(chatId, "💰 É *pré-reserva* ou já foi *pago*?\n\nEscreva 'pré' ou 'pago'");
           return;
         }
 
