@@ -696,6 +696,16 @@ async function enviarResumoAgendamento(chatId, d) {
   );
 }
 
+// cores do Google Calendar por estúdio (colorId oficial da API)
+// Lavanda=1, Sálvia=2, Uva=3, Flamingo=4, Banana=5, Tangerina=6, Pavão=7, Grafite=8, Mirtilo=9, Tomate=11
+const COR_POR_ESTUDIO = {
+  C: "1",  // Lavanda
+  D: "4",  // Flamingo
+  "2": "2", // Sálvia
+  "3": "7", // Pavão
+  // A, B, AB, 1 -> sem entrada = cor padrão da agenda
+};
+
 // cria o evento de verdade na agenda
 async function criarEvento(dados) {
   const hTitulo = (h, m) => (m ? `${h}:${String(m).padStart(2, "0")}` : `${h}`);
@@ -703,14 +713,17 @@ async function criarEvento(dados) {
   let descricao = dados.nome;
   if (dados.telefone) descricao += ` ${dados.telefone}`;
   if (dados.pago) descricao += `\npago R$${dados.pago}`;
+  const eventBody = {
+    summary: titulo,
+    description: descricao,
+    start: { dateTime: dados.inicio.toISOString(), timeZone: "America/Sao_Paulo" },
+    end: { dateTime: dados.fim.toISOString(), timeZone: "America/Sao_Paulo" },
+  };
+  const cor = COR_POR_ESTUDIO[dados.estudio];
+  if (cor) eventBody.colorId = cor;
   await calendar.events.insert({
     calendarId: dados.calId,
-    requestBody: {
-      summary: titulo,
-      description: descricao,
-      start: { dateTime: dados.inicio.toISOString(), timeZone: "America/Sao_Paulo" },
-      end: { dateTime: dados.fim.toISOString(), timeZone: "America/Sao_Paulo" },
-    },
+    requestBody: eventBody,
   });
   return titulo;
 }
