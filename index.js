@@ -110,9 +110,31 @@ const NUMEROS_TESTE = (process.env.NUMEROS_TESTE ||
   "553291590828,5511995540293,5511973776098,5511998622830,5511999951338")
   .split(",").map(s => s.trim()).filter(Boolean);
 
+// gera as variantes possíveis de um telefone brasileiro (com e sem o 9º dígito extra)
+// resolve o caso de contatos com WhatsApp cadastrado no formato antigo (8 dígitos locais)
+function variantesTelefone(tel) {
+  if (!tel || tel.length < 12) return [tel];
+  const cc = tel.slice(0, 2);   // "55"
+  const ddd = tel.slice(2, 4);  // DDD
+  const resto = tel.slice(4);   // número local
+  const variantes = new Set([tel]);
+  if (resto.length === 9 && resto[0] === "9") {
+    variantes.add(cc + ddd + resto.slice(1)); // remove o 9 extra -> formato antigo (8 dígitos)
+  } else if (resto.length === 8) {
+    variantes.add(cc + ddd + "9" + resto); // adiciona o 9 -> formato novo (9 dígitos)
+  }
+  return Array.from(variantes);
+}
+
 function ehNumeroDeTeste(telefone) {
   if (!telefone) return false;
-  return NUMEROS_TESTE.includes(telefone);
+  return variantesTelefone(telefone).some(v => NUMEROS_TESTE.includes(v));
+}
+
+// retorna a variante EXATA que está na lista de teste (a que sabemos que funciona no WhatsApp)
+function numeroTesteConfirmado(telefone) {
+  if (!telefone) return null;
+  return variantesTelefone(telefone).find(v => NUMEROS_TESTE.includes(v)) || null;
 }
 
 // monta o chatId do WhatsApp a partir de um telefone (formato 55DDDNÚMERO)
@@ -375,10 +397,11 @@ function montarMensagemAgrupada(eventos) {
 // testa o envio de verdade para UM telefone específico (útil para depurar sem mexer nos outros)
 async function testarUmNumero(telBusca, destino = ADMIN_CHAT_ID) {
   const alvo = telBusca.replace(/\D/g, "");
+  const variantesAlvo = variantesTelefone(alvo);
   const achados = await coletarEventosPre(360);
   const encontrados = achados.filter(({ ev }) => {
     const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
-    return tel && tel.includes(alvo);
+    return tel && variantesAlvo.includes(tel);
   });
 
   if (encontrados.length === 0) {
@@ -387,16 +410,17 @@ async function testarUmNumero(telBusca, destino = ADMIN_CHAT_ID) {
   }
 
   const telReal = extrairTelefone((encontrados[0].ev.summary || "") + " " + (encontrados[0].ev.description || ""));
+  const telEnvio = numeroTesteConfirmado(telReal) || telReal;
   const msg = montarMensagemAgrupada(encontrados);
 
-  await sendMessage(destino, `🧪 Testando envio isolado para ${telReal} (${encontrados.length} reserva(s) encontrada(s))...`);
+  await sendMessage(destino, `🧪 Testando envio isolado para ${telEnvio} (${encontrados.length} reserva(s) encontrada(s))...`);
 
   if (!ehNumeroDeTeste(telReal)) {
     await sendMessage(destino, `⚠️ Esse número NÃO está na lista de teste (NUMEROS_TESTE). Por segurança, não vou enviar de verdade. Mostrando só a mensagem que seria enviada:\n\n${msg}`);
     return;
   }
 
-  const sucesso = await sendMessage(telefoneParaChatId(telReal), msg);
+  const sucesso = await sendMessage(telefoneParaChatId(telEnvio), msg);
   const status = sucesso ? "✅ Enviado com sucesso!" : "❌ FALHOU ao enviar (número pode não ter WhatsApp ou formato incorreto).";
   await sendMessage(destino, `${status}\n\nMensagem enviada:\n${msg}`);
 }
@@ -536,10 +560,11 @@ async function rodarEnsaioConfirmacoes(marcar = false, destino = ADMIN_CHAT_ID) 
       const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
 
       if (ehNumeroDeTeste(tel)) {
-        // TESTE: envia de verdade para o número da equipe, e avisa o admin (com o resultado real)
-        const sucesso = await sendMessage(telefoneParaChatId(tel), msg);
+        // TESTE: envia de verdade usando a variante do número que sabemos que funciona no WhatsApp
+        const telEnvio = numeroTesteConfirmado(tel) || tel;
+        const sucesso = await sendMessage(telefoneParaChatId(telEnvio), msg);
         const status = sucesso ? "✅ Enviado com sucesso" : "❌ FALHOU ao enviar (número pode não ter WhatsApp ou formato incorreto)";
-        await sendMessage(destino, `🧪 [TESTE REAL] ${status} para ${tel}${qtd}:\n\n${msg}`);
+        await sendMessage(destino, `🧪 [TESTE REAL] ${status} para ${telEnvio}${qtd}:\n\n${msg}`);
       } else {
         await sendMessage(destino, `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`);
       }
@@ -570,11 +595,12 @@ async function rodarEnsaioConfirmacoes(marcar = false, destino = ADMIN_CHAT_ID) 
       const msgCliente = montarMensagemCancelamento(ev, calId);
 
       if (ehNumeroDeTeste(tel)) {
-        // AÇÃO REAL: envia a mensagem de verdade e move o evento para Cancelados
-        await sendMessage(telefoneParaChatId(tel), msgCliente);
+        // AÇÃO REAL: envia a mensagem de verdade (com a variante correta) e move o evento para Cancelados
+        const telEnvio = numeroTesteConfirmado(tel) || tel;
+        await sendMessage(telefoneParaChatId(telEnvio), msgCliente);
         await moverParaCancelados(ev, calId);
         await sendMessage(destino,
-          `🧪 [TESTE REAL] CANCELAMENTO executado para ${tel}\n📌 ${ev.summary || "(sem título)"}\n\n` +
+          `🧪 [TESTE REAL] CANCELAMENTO executado para ${telEnvio}\n📌 ${ev.summary || "(sem título)"}\n\n` +
           `✅ Mensagem enviada ao cliente.\n✅ Evento movido para a agenda Cancelados.`
         );
       } else {
