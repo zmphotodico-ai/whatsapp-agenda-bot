@@ -298,7 +298,7 @@ async function coletarEventosPre(diasFrente = 360) {
 }
 
 // lista as reservas "pré" que estão SEM telefone, pra facilitar o preenchimento
-async function listarSemTelefone() {
+async function listarSemTelefone(destino = ADMIN_CHAT_ID) {
   const achados = await coletarEventosPre(360);
   const semTel = [];
   for (const { ev } of achados) {
@@ -306,7 +306,7 @@ async function listarSemTelefone() {
     if (!tel) semTel.push(ev);
   }
   if (semTel.length === 0) {
-    await sendMessage(ADMIN_CHAT_ID, "✅ Todas as reservas 'pré' já têm telefone. Nada a preencher!");
+    await sendMessage(destino, "✅ Todas as reservas 'pré' já têm telefone. Nada a preencher!");
     return;
   }
   let msg = `📵 ${semTel.length} reserva(s) 'pré' SEM telefone (preencher na descrição):\n`;
@@ -316,7 +316,7 @@ async function listarSemTelefone() {
     const hora = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
     msg += `\n━━━━━━\n📌 ${ev.summary || "(sem título)"}\n🗓️ ${data} às ${hora}\n👤 ${extrairNome(ev) || "(sem nome)"}`;
   }
-  await sendMessage(ADMIN_CHAT_ID, msg);
+  await sendMessage(destino, msg);
 }
 
 // monta uma linha curta de uma reserva (para a lista dentro da mensagem agrupada)
@@ -372,8 +372,37 @@ function montarMensagemAgrupada(eventos) {
   return `${abertura}\n\n${linhas}\n${endereco}${linhaValor}\n\nPIX/CNPJ\nzmphoto@zmphoto.com.br\n43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
 }
 
+// testa o envio de verdade para UM telefone específico (útil para depurar sem mexer nos outros)
+async function testarUmNumero(telBusca, destino = ADMIN_CHAT_ID) {
+  const alvo = telBusca.replace(/\D/g, "");
+  const achados = await coletarEventosPre(360);
+  const encontrados = achados.filter(({ ev }) => {
+    const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
+    return tel && tel.includes(alvo);
+  });
+
+  if (encontrados.length === 0) {
+    await sendMessage(destino, `🔍 Nenhuma reserva "pré" encontrada com o telefone "${telBusca}".`);
+    return;
+  }
+
+  const telReal = extrairTelefone((encontrados[0].ev.summary || "") + " " + (encontrados[0].ev.description || ""));
+  const msg = montarMensagemAgrupada(encontrados);
+
+  await sendMessage(destino, `🧪 Testando envio isolado para ${telReal} (${encontrados.length} reserva(s) encontrada(s))...`);
+
+  if (!ehNumeroDeTeste(telReal)) {
+    await sendMessage(destino, `⚠️ Esse número NÃO está na lista de teste (NUMEROS_TESTE). Por segurança, não vou enviar de verdade. Mostrando só a mensagem que seria enviada:\n\n${msg}`);
+    return;
+  }
+
+  const sucesso = await sendMessage(telefoneParaChatId(telReal), msg);
+  const status = sucesso ? "✅ Enviado com sucesso!" : "❌ FALHOU ao enviar (número pode não ter WhatsApp ou formato incorreto).";
+  await sendMessage(destino, `${status}\n\nMensagem enviada:\n${msg}`);
+}
+
 // busca reservas "pré" cujo nome/descrição contém o texto pesquisado
-async function buscarPorNome(termo) {
+async function buscarPorNome(termo, destino = ADMIN_CHAT_ID) {
   const alvo = normalizar(termo);
   const achados = await coletarEventosPre(360);
   const encontrados = achados.filter(({ ev }) => {
@@ -381,7 +410,7 @@ async function buscarPorNome(termo) {
     return texto.includes(alvo);
   });
   if (encontrados.length === 0) {
-    await sendMessage(ADMIN_CHAT_ID, `🔍 Nenhuma reserva "pré" encontrada para "${termo}".`);
+    await sendMessage(destino, `🔍 Nenhuma reserva "pré" encontrada para "${termo}".`);
     return;
   }
   let msg = `🔍 ${encontrados.length} reserva(s) para "${termo}":\n`;
@@ -393,7 +422,7 @@ async function buscarPorNome(termo) {
     const est = extrairEstudio(ev);
     msg += `\n━━━━━━\n📌 ${ev.summary || "(sem título)"}\n🗓️ ${data} às ${hora}${est ? ` · Estúdio ${est}` : ""}\n📞 ${tel || "⚠️ SEM telefone"}`;
   }
-  await sendMessage(ADMIN_CHAT_ID, msg);
+  await sendMessage(destino, msg);
 }
 
 // conta quantas vezes já foi cobrado, lendo as marcas na descrição
@@ -454,11 +483,11 @@ async function moverParaCancelados(ev, calIdOrigem) {
 }
 
 // roda o ensaio. Se marcar=true, escreve [cobrado Nx] na descrição (só no automático das 8h)
-async function rodarEnsaioConfirmacoes(marcar = false) {
-  await sendMessage(ADMIN_CHAT_ID, `🧪 MODO ENSAIO${marcar ? " (automático)" : ""}: procurando reservas 'pré'...`);
+async function rodarEnsaioConfirmacoes(marcar = false, destino = ADMIN_CHAT_ID) {
+  await sendMessage(destino, `🧪 MODO ENSAIO${marcar ? " (automático)" : ""}: procurando reservas 'pré'...`);
   const achados = await coletarEventosPre(360);
   if (achados.length === 0) {
-    await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva com 'pré' encontrada nos próximos 90 dias.");
+    await sendMessage(destino, "Nenhuma reserva com 'pré' encontrada nos próximos 90 dias.");
     return;
   }
 
@@ -471,7 +500,7 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
   }
 
   if (paraCobrar.length === 0 && paraCancelar.length === 0) {
-    await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva a processar hoje.");
+    await sendMessage(destino, "Nenhuma reserva a processar hoje.");
     return;
   }
 
@@ -485,7 +514,7 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
   }
 
   const totalClientes = Object.keys(grupos).length + semTelefone.length;
-  await sendMessage(ADMIN_CHAT_ID, `Encontrei ${paraCobrar.length} reserva(s) a cobrar, agrupadas em ${totalClientes} cliente(s). NADA foi enviado ao cliente. 👇`);
+  await sendMessage(destino, `Encontrei ${paraCobrar.length} reserva(s) a cobrar, agrupadas em ${totalClientes} cliente(s). NADA foi enviado ao cliente. 👇`);
 
   let marc1 = 0, marc2 = 0;
 
@@ -510,12 +539,12 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
         // TESTE: envia de verdade para o número da equipe, e avisa o admin (com o resultado real)
         const sucesso = await sendMessage(telefoneParaChatId(tel), msg);
         const status = sucesso ? "✅ Enviado com sucesso" : "❌ FALHOU ao enviar (número pode não ter WhatsApp ou formato incorreto)";
-        await sendMessage(ADMIN_CHAT_ID, `🧪 [TESTE REAL] ${status} para ${tel}${qtd}:\n\n${msg}`);
+        await sendMessage(destino, `🧪 [TESTE REAL] ${status} para ${tel}${qtd}:\n\n${msg}`);
       } else {
-        await sendMessage(ADMIN_CHAT_ID, `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`);
+        await sendMessage(destino, `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`);
       }
     } catch (e) {
-      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar o cliente ${tel}: ${e.message}`);
+      await sendMessage(destino, `⚠️ Erro ao processar o cliente ${tel}: ${e.message}`);
     }
     await marcarLista(eventos);
     await esperar(3000);
@@ -525,9 +554,9 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
   for (const item of semTelefone) {
     try {
       const msg = montarMensagemAgrupada([item]);
-      await sendMessage(ADMIN_CHAT_ID, `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${item.ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`);
+      await sendMessage(destino, `━━━━━━━━━━\n📞 ⚠️ SEM telefone — ${item.ev.summary || "(sem título)"}\n\n✉️ Mensagem:\n${msg}`);
     } catch (e) {
-      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro ao processar "${item.ev.summary || "(sem título)"}": ${e.message}`);
+      await sendMessage(destino, `⚠️ Erro ao processar "${item.ev.summary || "(sem título)"}": ${e.message}`);
     }
     await marcarLista([item]);
     await esperar(3000);
@@ -544,7 +573,7 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
         // AÇÃO REAL: envia a mensagem de verdade e move o evento para Cancelados
         await sendMessage(telefoneParaChatId(tel), msgCliente);
         await moverParaCancelados(ev, calId);
-        await sendMessage(ADMIN_CHAT_ID,
+        await sendMessage(destino,
           `🧪 [TESTE REAL] CANCELAMENTO executado para ${tel}\n📌 ${ev.summary || "(sem título)"}\n\n` +
           `✅ Mensagem enviada ao cliente.\n✅ Evento movido para a agenda Cancelados.`
         );
@@ -555,10 +584,10 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
           `1️⃣ Enviaria esta mensagem ao cliente:\n"${msgCliente}"\n\n` +
           `2️⃣ Moveria o evento para a agenda Cancelados.\n\n` +
           `(Nada foi feito — apenas simulação.)`;
-        await sendMessage(ADMIN_CHAT_ID, bloco);
+        await sendMessage(destino, bloco);
       }
     } catch (e) {
-      await sendMessage(ADMIN_CHAT_ID, `⚠️ Erro no cancelamento de "${ev.summary || "(sem título)"}": ${e.message}`);
+      await sendMessage(destino, `⚠️ Erro no cancelamento de "${ev.summary || "(sem título)"}": ${e.message}`);
     }
     await esperar(3000);
   }
@@ -569,7 +598,7 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
   const resumoCancel = paraCancelar.length
     ? `\n🛑 ${paraCancelar.length} reserva(s) no estágio de cancelamento (simulado).`
     : "";
-  await sendMessage(ADMIN_CHAT_ID, `✅ Fim do ensaio.${resumoMarca}${resumoCancel}`);
+  await sendMessage(destino, `✅ Fim do ensaio.${resumoMarca}${resumoCancel}`);
 }
 
 // =============================
@@ -1069,59 +1098,71 @@ client.on('message', async (msg) => {
       }
     }
 
-    // 🔒 COMANDOS EXCLUSIVOS DO ADMIN PARA CONTROLAR O BOT
-    if (chatId === ADMIN_CHAT_ID) {
+    // 🔒 COMANDOS DE ADMIN — liberado para o admin E para os números autorizados (estúdio)
+    if (chatId === ADMIN_CHAT_ID || AGENDADORES.includes(chatId)) {
       if (textoMensagem === '!desativar' || textoMensagem === '!bot off') {
         botAtivo = false;
-        await sendMessage(ADMIN_CHAT_ID, "❌ O robô foi DESATIVADO. Pode responder manualmente de forma tranquila!");
+        await sendMessage(chatId, "❌ O robô foi DESATIVADO. Pode responder manualmente de forma tranquila!");
         return;
       }
       if (textoMensagem === '!ativar' || textoMensagem === '!bot on') {
         botAtivo = true;
-        await sendMessage(ADMIN_CHAT_ID, "✅ O robô foi ATIVADO! Voltei a atender os clientes.");
+        await sendMessage(chatId, "✅ O robô foi ATIVADO! Voltei a atender os clientes.");
         return;
       }
       if (textoMensagem === '!status') {
-        await sendMessage(ADMIN_CHAT_ID, `🤖 O robô está atualmente: ${botAtivo ? "LIGADO ✅" : "DESLIGADO ❌"}`);
+        await sendMessage(chatId, `🤖 O robô está atualmente: ${botAtivo ? "LIGADO ✅" : "DESLIGADO ❌"}`);
         return;
       }
       // 🔎 TESTE: mostra o que o robô está lendo das agendas (não liga o respondedor)
       if (textoMensagem === '!agenda') {
-        await sendMessage(ADMIN_CHAT_ID, "🔎 Lendo as agendas, um instante...");
+        await sendMessage(chatId, "🔎 Lendo as agendas, um instante...");
         const lista = await getAgendaOcupada();
-        await sendMessage(ADMIN_CHAT_ID, `📅 AGENDA (próximos 15 dias):\n\n${lista}`);
+        await sendMessage(chatId, `📅 AGENDA (próximos 15 dias):\n\n${lista}`);
         return;
       }
-      // 🧪 ENSAIO: monta as confirmações "pré" e manda só pra você (nada vai pro cliente)
+      // 🧪 ENSAIO: monta as confirmações "pré" e manda para quem pediu (nada vai pro cliente)
       if (textoMensagem === '!testar') {
-        await rodarEnsaioConfirmacoes();
+        await rodarEnsaioConfirmacoes(false, chatId);
         return;
       }
       // 📵 lista as reservas "pré" que estão sem telefone
       if (textoMensagem === '!semtelefone') {
-        await listarSemTelefone();
+        await listarSemTelefone(chatId);
         return;
       }
       // 🔍 busca reservas por nome do cliente. Ex.: !buscar new star
       if (textoMensagem.startsWith('!buscar')) {
         const termo = msg.body.trim().slice(7).trim(); // texto depois de "!buscar"
         if (!termo) {
-          await sendMessage(ADMIN_CHAT_ID, "Escreva o nome depois do comando. Ex.: !buscar new star");
+          await sendMessage(chatId, "Escreva o nome depois do comando. Ex.: !buscar new star");
         } else {
-          await buscarPorNome(termo);
+          await buscarPorNome(termo, chatId);
+        }
+        return;
+      }
+      // 🧪 testa o envio real para UM telefone específico. Ex.: !testarnumero 553291590828
+      if (textoMensagem.startsWith('!testarnumero')) {
+        const tel = msg.body.trim().slice(13).trim();
+        if (!tel) {
+          await sendMessage(chatId, "Escreva o telefone depois do comando. Ex.: !testarnumero 553291590828");
+        } else {
+          await testarUmNumero(tel, chatId);
         }
         return;
       }
       // ❓ lista os comandos disponíveis
       if (textoMensagem === '!ajuda') {
-        await sendMessage(ADMIN_CHAT_ID,
+        await sendMessage(chatId,
           "🤖 *Comandos disponíveis:*\n\n" +
           "!testar — mostra as cobranças (modo ensaio)\n" +
           "!semtelefone — lista reservas sem telefone\n" +
           "!buscar [nome] — busca reservas de um cliente\n" +
+          "!testarnumero [telefone] — testa o envio real para um número específico\n" +
           "!agenda — mostra a agenda dos próximos 15 dias\n" +
           "!status — diz se o respondedor está ligado\n" +
           "!ativar / !desativar — liga/desliga o respondedor\n" +
+          "!agendar — cria uma nova reserva (passo a passo)\n" +
           "!meuid — mostra seu ID"
         );
         return;
