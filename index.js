@@ -1152,6 +1152,13 @@ client.on('message', async (msg) => {
         await rodarEnsaioConfirmacoes(false, chatId);
         return;
       }
+      // ⏰ Roda o ciclo REAL agora (igual ao automático das 8h): marca [cobrado Nx] na agenda
+      // e envia de verdade para números de teste. Útil para testar sem esperar até amanhã.
+      if (textoMensagem === '!rodarciclo') {
+        await sendMessage(chatId, "⏰ Rodando o ciclo real agora (marca avisos + envia para números de teste)...");
+        await rodarEnsaioConfirmacoes(true, chatId);
+        return;
+      }
       // 📵 lista as reservas "pré" que estão sem telefone
       if (textoMensagem === '!semtelefone') {
         await listarSemTelefone(chatId);
@@ -1182,6 +1189,7 @@ client.on('message', async (msg) => {
         await sendMessage(chatId,
           "🤖 *Comandos disponíveis:*\n\n" +
           "!testar — mostra as cobranças (modo ensaio)\n" +
+          "!rodarciclo — roda o ciclo real AGORA (marca avisos + envia p/ números de teste)\n" +
           "!semtelefone — lista reservas sem telefone\n" +
           "!buscar [nome] — busca reservas de um cliente\n" +
           "!testarnumero [telefone] — testa o envio real para um número específico\n" +
