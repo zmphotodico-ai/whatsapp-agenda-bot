@@ -263,7 +263,7 @@ function montarMensagemConfirmacao(ev, calId) {
 
 // procura eventos marcados como "pré" nas agendas de COBRANÇA
 // (ignora a agenda de Cancelados, que é a 3ª em CALENDAR_IDS)
-async function coletarEventosPre(diasFrente = 90) {
+async function coletarEventosPre(diasFrente = 360) {
   const agora = new Date();
   const limite = new Date(agora.getTime() + diasFrente * 24 * 60 * 60 * 1000);
   let achados = [];
@@ -293,7 +293,7 @@ async function coletarEventosPre(diasFrente = 90) {
 
 // lista as reservas "pré" que estão SEM telefone, pra facilitar o preenchimento
 async function listarSemTelefone() {
-  const achados = await coletarEventosPre(90);
+  const achados = await coletarEventosPre(360);
   const semTel = [];
   for (const { ev } of achados) {
     const tel = extrairTelefone((ev.summary || "") + " " + (ev.description || ""));
@@ -369,7 +369,7 @@ function montarMensagemAgrupada(eventos) {
 // busca reservas "pré" cujo nome/descrição contém o texto pesquisado
 async function buscarPorNome(termo) {
   const alvo = normalizar(termo);
-  const achados = await coletarEventosPre(90);
+  const achados = await coletarEventosPre(360);
   const encontrados = achados.filter(({ ev }) => {
     const texto = normalizar((ev.summary || "") + " " + (ev.description || ""));
     return texto.includes(alvo);
@@ -450,7 +450,7 @@ async function moverParaCancelados(ev, calIdOrigem) {
 // roda o ensaio. Se marcar=true, escreve [cobrado Nx] na descrição (só no automático das 8h)
 async function rodarEnsaioConfirmacoes(marcar = false) {
   await sendMessage(ADMIN_CHAT_ID, `🧪 MODO ENSAIO${marcar ? " (automático)" : ""}: procurando reservas 'pré'...`);
-  const achados = await coletarEventosPre(90);
+  const achados = await coletarEventosPre(360);
   if (achados.length === 0) {
     await sendMessage(ADMIN_CHAT_ID, "Nenhuma reserva com 'pré' encontrada nos próximos 90 dias.");
     return;
@@ -738,15 +738,46 @@ function montarMensagemParaCliente(d, inicio, fim) {
   return `Obrigado ${primeiroNome}! 😊\nPré-marcado Estúdio ${d.estudio}, ${dataExtenso}, das ${hi} às ${hf}.\n${endereco}${linhaSinal}\n\nPIX: zmphoto@zmphoto.com.br\nou CNPJ 43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
 }
 
-// envia o resumo do agendamento para confirmação
-async function enviarResumoAgendamento(chatId, d) {
-  const { inicio, fim } = montarDatas(d);
-  const dataFmt = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: '2-digit', month: '2-digit' });
-  const hi = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-  const hf = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+// monta a mensagem PRONTA para o cliente quando há VÁRIAS datas (mesmo cliente)
+function montarMensagemParaClienteMulti(d, reservas, pagoFinal) {
+  const primeiroNome = (d.nome || "").split(" ")[0];
+  const unidades = new Set(reservas.map(r => r.unidade));
+  // usa o endereço da 1ª reserva (geralmente todas são da mesma unidade)
+  const endereco = (reservas[0].unidade === "Aclimação") ? ENDERECO_ACLIMACAO : ENDERECO_BELAVISTA;
+
+  const linhas = reservas.map(r => {
+    const dataExtenso = r.inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'long', day: 'numeric', month: 'long' });
+    const hi = r.inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+    const hf = r.fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' }).replace(":", "h");
+    return `• Estúdio ${r.estudio}, ${dataExtenso}, das ${hi} às ${hf}`;
+  }).join("\n");
+
+  if (pagoFinal) {
+    return `Obrigado ${primeiroNome}! 😊\nReserva confirmada:\n${linhas}\n${endereco}\n\nPagamento de R$ ${pagoFinal} recebido. Até lá!`;
+  }
+
+  // soma o sinal mínimo de todas as datas (mesma regra: min R$50/dia, calculado por data)
+  let sinalTotal = 0;
+  for (const r of reservas) {
+    const s = calcularSinalAgendamento({ unidade: r.unidade, estudio: r.estudio }, r.inicio, r.fim);
+    sinalTotal += s || 50;
+  }
+  return `Obrigado ${primeiroNome}! 😊\nPré-marcado:\n${linhas}\n${endereco}\n\nPara fazer a reserva pedimos R$ ${sinalTotal} antecipado (total), ok?\n\nPIX: zmphoto@zmphoto.com.br\nou CNPJ 43.345.289/0001-93\nZemaria Produções Fotográficas LTDA`;
+}
+
+// envia o resumo do agendamento (uma ou várias reservas) para confirmação
+async function enviarResumoAgendamento(chatId, conversa) {
+  const d = conversa.dados;
+  let linhas = "";
+  for (const r of conversa.reservas) {
+    const { inicio, fim } = montarDatas(r);
+    const dataFmt = inicio.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", weekday: 'short', day: '2-digit', month: '2-digit' });
+    const hi = inicio.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+    const hf = fim.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+    linhas += `\n📅 ${dataFmt} · ${hi} às ${hf} · Estúdio ${r.estudio} (${r.unidade})`;
+  }
   await sendMessage(chatId,
-    `📋 *Confirma este agendamento?*\n\n` +
-    `📅 ${dataFmt}\n🕐 ${hi} às ${hf}\n📸 Estúdio ${d.estudio} (${d.unidade})\n👤 ${d.nome}\n📞 ${d.telefone}\n${d.pago ? `💰 pago R$${d.pago}` : "🔖 pré-reserva"}\n\n` +
+    `📋 *Confirma este agendamento?*\n${linhas}\n\n👤 ${d.nome}\n📞 ${d.telefone}\n${d.pago ? `💰 pago R$${d.pago} (total)` : "🔖 pré-reserva"}\n\n` +
     `Responda *SIM* para confirmar ou *NÃO* para cancelar.`
   );
 }
@@ -844,10 +875,18 @@ client.on('message', async (msg) => {
         return;
       }
 
-      // inicia o fluxo
-      if (textoMensagem === '!agendar') {
-        conversasAgendamento[chatId] = { passo: 'data', dados: {} };
-        await sendMessage(chatId, "📅 *Novo agendamento*\n\nQual a *data*? (ex: 25/07)\n\n_(escreva 'cancelar' a qualquer momento para desistir)_");
+      // inicia o fluxo — !agendar (1 data) ou !agendar N (N datas do mesmo cliente)
+      if (textoMensagem === '!agendar' || /^!agendar\s+\d+$/.test(textoMensagem)) {
+        const mQtd = textoMensagem.match(/^!agendar\s+(\d+)$/);
+        const qtd = mQtd ? Math.max(1, Math.min(10, parseInt(mQtd[1]))) : 1;
+        conversasAgendamento[chatId] = {
+          passo: 'data',
+          qtd,
+          reservas: [],       // vai guardando {dia,mes,h1,m1,h2,m2,estudio,calId,unidade}
+          dados: {},          // dados comuns: nome, telefone, pago
+        };
+        const rotulo = qtd > 1 ? ` (data 1 de ${qtd})` : "";
+        await sendMessage(chatId, `📅 *Novo agendamento*${rotulo}\n\nQual a *data*? (ex: 25/07)\n\n_(escreva 'cancelar' a qualquer momento para desistir)_`);
         return;
       }
 
@@ -855,11 +894,12 @@ client.on('message', async (msg) => {
       if (conversasAgendamento[chatId]) {
         const conversa = conversasAgendamento[chatId];
         const d = conversa.dados;
+        const reservaAtual = conversa.reservas.length; // índice da reserva sendo preenchida (0-based)
 
         if (conversa.passo === 'data') {
           const v = validarData(textoOriginal);
           if (!v) { await sendMessage(chatId, "⚠️ Data inválida. Use o formato DD/MM (ex: 25/07). Tente de novo:"); return; }
-          d.dia = v.dia; d.mes = v.mes;
+          conversa._temp = { dia: v.dia, mes: v.mes };
           conversa.passo = 'horario';
           await sendMessage(chatId, "🕐 Qual o *horário*? (ex: 14-16 ou 14:30-16:30)");
           return;
@@ -868,7 +908,7 @@ client.on('message', async (msg) => {
         if (conversa.passo === 'horario') {
           const v = validarHorario(textoOriginal);
           if (!v) { await sendMessage(chatId, "⚠️ Horário inválido. Use HH-HH (ex: 14-16). Tente de novo:"); return; }
-          d.h1 = v.h1; d.m1 = v.m1; d.h2 = v.h2; d.m2 = v.m2;
+          conversa._temp.h1 = v.h1; conversa._temp.m1 = v.m1; conversa._temp.h2 = v.h2; conversa._temp.m2 = v.m2;
           conversa.passo = 'estudio';
           await sendMessage(chatId, "📸 Qual o *estúdio*?\n\nAclimação: A, B, C, D, AB\nBela Vista: 1, 2, 3");
           return;
@@ -877,7 +917,19 @@ client.on('message', async (msg) => {
         if (conversa.passo === 'estudio') {
           const v = validarEstudio(textoOriginal);
           if (!v) { await sendMessage(chatId, "⚠️ Estúdio inválido. Escreva A, B, C, D, AB, 1, 2 ou 3. Tente de novo:"); return; }
-          d.estudio = v.estudio; d.calId = v.calId; d.unidade = v.unidade;
+          conversa._temp.estudio = v.estudio; conversa._temp.calId = v.calId; conversa._temp.unidade = v.unidade;
+          conversa.reservas.push(conversa._temp);
+          delete conversa._temp;
+
+          // ainda faltam datas? repete o ciclo data/horário/estúdio
+          if (conversa.reservas.length < conversa.qtd) {
+            const proxima = conversa.reservas.length + 1;
+            conversa.passo = 'data';
+            await sendMessage(chatId, `📅 Data ${proxima} de ${conversa.qtd}: qual a *data*? (ex: 25/07)`);
+            return;
+          }
+
+          // todas as datas coletadas, segue para os dados do cliente
           conversa.passo = 'nome';
           await sendMessage(chatId, "👤 Qual o *nome* do cliente?");
           return;
@@ -932,7 +984,7 @@ client.on('message', async (msg) => {
           if (textoMensagem === 'pre' || textoMensagem === 'pré') {
             d.pago = null;
             conversa.passo = 'confirmar';
-            await enviarResumoAgendamento(chatId, d);
+            await enviarResumoAgendamento(chatId, conversa);
             return;
           }
           if (textoMensagem === 'pago') {
@@ -949,32 +1001,52 @@ client.on('message', async (msg) => {
           if (!valor) { await sendMessage(chatId, "⚠️ Valor inválido. Digite só o número (ex: 210):"); return; }
           d.pago = valor;
           conversa.passo = 'confirmar';
-          await enviarResumoAgendamento(chatId, d);
+          await enviarResumoAgendamento(chatId, conversa);
           return;
         }
 
         if (conversa.passo === 'confirmar') {
           if (textoMensagem === 'sim') {
-            const { inicio, fim } = montarDatas(d);
-            d.inicio = inicio; d.fim = fim;
-            // checa conflito antes de criar
-            const conflito = await horarioOcupado(d.calId, d.estudio, inicio, fim);
-            if (conflito) {
-              const ci = new Date(conflito.start.dateTime || conflito.start.date);
-              const cf = new Date(conflito.end.dateTime || conflito.end.date);
-              const hi = ci.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-              const hf = cf.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
-              await sendMessage(chatId, `❌ Esse estúdio já está ocupado nesse horário!\nJá existe: "${conflito.summary}" das ${hi} às ${hf}.\n\nNão agendei nada.`);
-              delete conversasAgendamento[chatId];
-              return;
+            // checa conflito em TODAS as reservas antes de criar qualquer uma
+            for (const r of conversa.reservas) {
+              const { inicio, fim } = montarDatas(r);
+              r.inicio = inicio; r.fim = fim;
+              const conflito = await horarioOcupado(r.calId, r.estudio, inicio, fim);
+              if (conflito) {
+                const ci = new Date(conflito.start.dateTime || conflito.start.date);
+                const cf = new Date(conflito.end.dateTime || conflito.end.date);
+                const hi = ci.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+                const hf = cf.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: '2-digit', minute: '2-digit' });
+                const dataFmt = ci.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
+                await sendMessage(chatId, `❌ O estúdio ${r.estudio} já está ocupado em ${dataFmt}!\nJá existe: "${conflito.summary}" das ${hi} às ${hf}.\n\nNenhuma reserva foi criada. Tente novamente.`);
+                delete conversasAgendamento[chatId];
+                return;
+              }
             }
+
+            // mínimo de R$50 por dia, se pago (garante mesmo que o valor total informado seja baixo)
+            let pagoFinal = d.pago;
+            if (pagoFinal) {
+              const minimoTotal = conversa.reservas.length * 50;
+              if (parseFloat(pagoFinal) < minimoTotal) {
+                pagoFinal = String(minimoTotal);
+                await sendMessage(chatId, `ℹ️ O valor informado é menor que o mínimo (R$50/dia). Ajustei para R$${minimoTotal} (${conversa.reservas.length} dia(s)).`);
+              }
+            }
+
+            // cria todas as reservas
+            const titulos = [];
             try {
-              const titulo = await criarEvento(d);
-              await sendMessage(chatId, `✅ *Agendado com sucesso!*\n📌 ${titulo}\n📍 ${d.unidade}\n👤 ${d.nome} · ${d.telefone}${d.pago ? `\n💰 pago R$${d.pago}` : "\n🔖 pré-reserva"}\n\n👇 Abaixo, a mensagem pronta para encaminhar ao cliente:`);
+              for (const r of conversa.reservas) {
+                const titulo = await criarEvento({ ...r, nome: d.nome, telefone: d.telefone, pago: pagoFinal });
+                titulos.push(titulo);
+              }
+              const lista = titulos.map(t => `📌 ${t}`).join("\n");
+              await sendMessage(chatId, `✅ *Agendado com sucesso!* (${titulos.length} data${titulos.length > 1 ? "s" : ""})\n${lista}\n👤 ${d.nome} · ${d.telefone}${pagoFinal ? `\n💰 pago R$${pagoFinal} (total)` : "\n🔖 pré-reserva"}\n\n👇 Abaixo, a mensagem pronta para encaminhar ao cliente:`);
               await esperar(1500);
-              await sendMessage(chatId, montarMensagemParaCliente(d, inicio, fim));
+              await sendMessage(chatId, montarMensagemParaClienteMulti(d, conversa.reservas, pagoFinal));
             } catch (e) {
-              await sendMessage(chatId, `❌ Erro ao criar o evento: ${e.message}`);
+              await sendMessage(chatId, `❌ Erro ao criar o(s) evento(s): ${e.message}`);
             }
             delete conversasAgendamento[chatId];
             return;
