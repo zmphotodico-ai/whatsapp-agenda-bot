@@ -90,7 +90,13 @@ client.on('ready', () => {
 client.initialize();
 
 async function sendMessage(chatId, text) {
-  try { await client.sendMessage(chatId, text); } catch (e) { console.error(e); }
+  try {
+    await client.sendMessage(chatId, text);
+    return true;
+  } catch (e) {
+    console.error(`Erro ao enviar para ${chatId}:`, e.message);
+    return false;
+  }
 }
 
 // pausa (em milissegundos) — usada para espaçar o envio de várias mensagens
@@ -101,7 +107,7 @@ function esperar(ms) {
 // Números de TESTE da equipe — recebem as mensagens de cobrança DE VERDADE (para validar o fluxo real).
 // Todos os outros continuam em modo ensaio (só o admin vê). Definível via env NUMEROS_TESTE.
 const NUMEROS_TESTE = (process.env.NUMEROS_TESTE ||
-  "5532991590828,5511995540293,5511973776098,5511998622830,5511999951338")
+  "553291590828,5511995540293,5511973776098,5511998622830,5511999951338")
   .split(",").map(s => s.trim()).filter(Boolean);
 
 function ehNumeroDeTeste(telefone) {
@@ -501,9 +507,10 @@ async function rodarEnsaioConfirmacoes(marcar = false) {
       const qtd = eventos.length > 1 ? ` (${eventos.length} datas)` : "";
 
       if (ehNumeroDeTeste(tel)) {
-        // TESTE: envia de verdade para o número da equipe, e avisa o admin
-        await sendMessage(telefoneParaChatId(tel), msg);
-        await sendMessage(ADMIN_CHAT_ID, `🧪 [TESTE REAL] Enviado de verdade para ${tel}${qtd}:\n\n${msg}`);
+        // TESTE: envia de verdade para o número da equipe, e avisa o admin (com o resultado real)
+        const sucesso = await sendMessage(telefoneParaChatId(tel), msg);
+        const status = sucesso ? "✅ Enviado com sucesso" : "❌ FALHOU ao enviar (número pode não ter WhatsApp ou formato incorreto)";
+        await sendMessage(ADMIN_CHAT_ID, `🧪 [TESTE REAL] ${status} para ${tel}${qtd}:\n\n${msg}`);
       } else {
         await sendMessage(ADMIN_CHAT_ID, `━━━━━━━━━━\n📞 ${tel}${qtd}\n\n✉️ Mensagem:\n${msg}`);
       }
